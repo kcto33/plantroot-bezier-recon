@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 二进制/运行时生成缓存
+*.npy
+
+# 服务器运行时生成的结果(会动态变化, 不纳入版本控制)
+results/
+
+# 旧的独立测试输出
+rebuilt_out/
+
+# 平台/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
