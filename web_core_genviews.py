@@ -71,8 +71,16 @@ def export_pose(cams, mark_meta=None):
             'cameras': cameras}
 
 
-def generate_views_from_matlab(m_file_path, outdir, seed=0):
-    """matlab -> 模型 -> 24 张带标记曲线图 + 位姿文件。返回结果路径。"""
+def generate_views_from_matlab(m_file_path, outdir, seed=0, progress_cb=None):
+    """matlab -> 模型 -> 24 张带标记曲线图 + 位姿文件。返回结果路径。
+    progress_cb(stage, done, total): 每生成一张视图回调一次, 供流式进度展示。"""
+    def _cb(stage, done, total):
+        if progress_cb:
+            try:
+                progress_cb(stage, done, total)
+            except Exception:
+                pass
+
     os.makedirs(outdir, exist_ok=True)
     with open(m_file_path, encoding='utf-8', errors='ignore') as f:
         text = f.read()
@@ -97,6 +105,7 @@ def generate_views_from_matlab(m_file_path, outdir, seed=0):
         draw_markers(targets, c, img, zbuf, k_scale=K_SCALE,
                      min_marker_r=MIN_MARKER_R, order_shift=ci)
         save_image(img, os.path.join(imgdir, f"{c.name}.png"))
+        _cb("生成视图", ci + 1, len(cams))
 
     mark_meta = {'n_curves': len(model.curves),
                  'points_per_curve': MARKS_PER_CURVE,

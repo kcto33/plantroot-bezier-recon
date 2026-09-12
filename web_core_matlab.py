@@ -57,14 +57,24 @@ def parse_matlab_params(text):
     return p
 
 
-def run_matlab_pipeline(m_file_path, outdir):
-    """matlab -> 模型 -> 根表 + 重建图。返回结果文件路径 dict。"""
+def run_matlab_pipeline(m_file_path, outdir, progress_cb=None):
+    """matlab -> 模型 -> 根表 + 重建图。返回结果文件路径 dict。
+    progress_cb(stage, done, total): 粗粒度阶段进度。"""
+    def _cb(stage, done, total):
+        if progress_cb:
+            try:
+                progress_cb(stage, done, total)
+            except Exception:
+                pass
+
     os.makedirs(outdir, exist_ok=True)
+    _cb("解析参数与生成模型", 1, 4)
     with open(m_file_path, encoding='utf-8', errors='ignore') as f:
         text = f.read()
     params = parse_matlab_params(text)
     model = RootModel(params, seed=0)
 
+    _cb("生成根表", 2, 4)
     # 根表
     rows, curve_rows = build_table(model)
     csv_path = os.path.join(outdir, "root_table.csv")
@@ -72,6 +82,7 @@ def run_matlab_pipeline(m_file_path, outdir):
     rows_to_csv(rows, csv_path)
     rows_to_sql(rows, table_name="root_table", path=sql_path)
 
+    _cb("渲染重建图", 3, 4)
     # 重建图: 拟合贝塞尔 vs 原始
     fitted = fit_model_curves(model, n_out=60)
     fig = plt.figure(figsize=(9, 8))
@@ -90,9 +101,15 @@ def run_matlab_pipeline(m_file_path, outdir):
     fig.savefig(img_path, dpi=115)
     plt.close(fig)
 
+    # 交互查看器数据
+    from render import export_model_json
+    export_model_json(fitted, os.path.join(outdir, "model3d.json"))
+    _cb("完成", 4, 4)
+
     return {
         'curves': len(model.curves), 'nodes': len(model.nodes),
         'table_csv': csv_path, 'table_sql': sql_path, 'image': img_path,
+        'model3d_json': os.path.join(outdir, "model3d.json"),
         'params': {'mainLength': params.mainLength, 'maxDepth': int(params.maxDepth),
                    'branchNum': params.branchNum},
     }

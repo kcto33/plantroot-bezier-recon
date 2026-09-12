@@ -3,46 +3,117 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>贝塞尔根系重建 · Web 端</title>
+<title>三维贝塞尔根系重建</title>
 <style>
-  :root { --bg:#f5f6f8; --card:#fff; --accent:#2b6cb0; --text:#1a202c; }
+  :root { --bg:#f5f6f8; --card:#fff; --accent:#2b6cb0; --accent-dark:#2c5282;
+          --text:#1a202c; --muted:#68707a; --line:#e5e7eb; --ok:#2f855a; --err:#e53e3e; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
          background:var(--bg); color:var(--text); }
-  header { background:linear-gradient(135deg,#2b6cb0,#3182ce); color:#fff;
-           padding:26px 32px; }
+  header { background:linear-gradient(135deg,#2b6cb0,#3182ce); color:#fff; padding:24px 32px; }
   header h1 { margin:0 0 6px; font-size:24px; }
   header p { margin:0; opacity:.9; font-size:14px; }
-  main { max-width:1100px; margin:0 auto; padding:26px 20px 64px; }
+  main { max-width:1100px; margin:0 auto; padding:22px 20px 64px; }
+
+  /* ---- 流程步骤条 ---- */
+  .stepper { display:flex; align-items:stretch; gap:0; margin:0 0 22px;
+             background:var(--card); border-radius:14px; padding:14px 18px;
+             box-shadow:0 2px 10px rgba(0,0,0,.06); flex-wrap:wrap; }
+  .step { flex:1; min-width:200px; display:flex; align-items:center; gap:10px; padding:4px 8px; }
+  .step .no { flex:none; width:30px; height:30px; border-radius:50%; background:var(--accent);
+              color:#fff; font-weight:700; font-size:15px; display:flex;
+              align-items:center; justify-content:center; }
+  .step .t { font-size:14px; font-weight:700; color:var(--text); }
+  .step .d { font-size:12px; color:var(--muted); margin-top:2px; }
+  .step-arrow { align-self:center; color:#a0aec0; font-size:22px; padding:0 4px; flex:none; }
+  .step-note { flex-basis:100%; margin-top:8px; font-size:12px; color:var(--muted); }
+  .step-note b { color:var(--accent); }
+
   .cards { display:grid; grid-template-columns:1fr 1fr; gap:22px; }
   @media(max-width:760px){ .cards{grid-template-columns:1fr;} }
   .card { background:var(--card); border-radius:14px; padding:22px 24px;
           box-shadow:0 2px 10px rgba(0,0,0,.06); }
-  .card h2 { margin:0 0 4px; font-size:19px; color:var(--accent); }
-  .card .sub { color:#68707a; font-size:13px; margin:0 0 16px; line-height:1.6; }
+  .card.wide { grid-column:1 / -1; }
+  .card h2 { margin:0 0 4px; font-size:19px; color:var(--accent); display:flex; align-items:center; gap:8px; }
+  .tag { font-size:11px; font-weight:700; padding:2px 8px; border-radius:20px; }
+  .tag.main { background:#ebf8ff; color:var(--accent); border:1px solid #bee3f8; }
+  .tag.alt  { background:#f7fafc; color:var(--muted); border:1px solid var(--line); }
+  .card .sub { color:var(--muted); font-size:13px; margin:0 0 16px; line-height:1.6; }
+  .card .sub b { color:var(--accent-dark); }
+
+  /* ---- 上传区 ---- */
   .drop { border:2px dashed #cbd5e0; border-radius:10px; padding:20px;
           text-align:center; color:#4a5568; font-size:14px; cursor:pointer;
           transition:.15s; }
   .drop:hover, .drop.over { border-color:var(--accent); background:#f0f7ff; }
+  .drop.over { border-style:solid; }
   .drop.small { padding:12px; font-size:13px; }
   .file-row { display:flex; align-items:center; gap:10px; margin-top:12px;
-              font-size:13px; color:#2d3748; }
+              font-size:13px; color:#2d3748; flex-wrap:wrap; }
+  .file-chip { display:inline-flex; align-items:center; gap:6px; background:#f7fafc;
+               border:1px solid var(--line); border-radius:8px; padding:4px 10px;
+               font-size:12px; color:#2d3748; }
+  .file-chip b { color:var(--accent-dark); }
+  .thumbs { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .thumbs img { width:52px; height:52px; object-fit:cover; border-radius:6px;
+                border:1px solid var(--line); }
+  .imported { background:#f0fff4; border:1px solid #9ae6b4; color:var(--ok);
+              border-radius:8px; padding:8px 12px; font-size:13px; margin-top:10px; }
+
   .btn { background:var(--accent); color:#fff; border:none; padding:9px 20px;
-         border-radius:8px; font-size:14px; cursor:pointer; margin-top:16px; }
-  .btn:hover { background:#2c5282; }
+         border-radius:8px; font-size:14px; cursor:pointer; margin-top:16px;
+         transition:.15s; }
+  .btn:hover { background:var(--accent-dark); }
   .btn:disabled { background:#a0aec0; cursor:not-allowed; }
-  .status { margin-top:12px; font-size:13px; color:#4a5568; }
-  .status.error { color:#e53e3e; }
-  .status.ok { color:#2f855a; }
-  section#result { margin-top:28px; }
-  section#result h2 { color:var(--accent); font-size:20px; }
+  .btn.ghost { background:#718096; }
+  .btn.ghost:hover { background:#4a5568; }
+  .btn.big { padding:10px 22px; font-size:15px; }
+  .btn.flash { animation:flash 1.2s ease-in-out 3; }
+  @keyframes flash { 0%,100%{ box-shadow:0 0 0 0 rgba(43,108,176,.0);} 50%{ box-shadow:0 0 0 8px rgba(43,108,176,.35);} }
+
+  .status { margin-top:12px; font-size:13px; color:#4a5568; min-height:18px;
+            display:flex; align-items:center; gap:8px; }
+  .status.error { color:var(--err); }
+  .status.ok { color:var(--ok); }
+  .pbar { flex:1; height:6px; background:#edf2f7; border-radius:3px; overflow:hidden; }
+  .pbar i { display:block; height:100%; background:var(--accent); border-radius:3px;
+            transition:width .3s; }
+  .slots { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+  .slots .slot, .slots img.v { width:64px; height:64px; border-radius:6px;
+                               border:1px solid var(--line); object-fit:cover; }
+  .slots .slot { background:#f1f5f9; display:flex; align-items:center;
+                 justify-content:center; color:#a0aec0; font-size:11px; }
+  .slots img.v { cursor:pointer; }
+  #lightbox { position:fixed; inset:0; background:rgba(0,0,0,.78); z-index:99;
+              overflow:auto; }
+  #lightbox img { display:block; margin:24px auto; max-width:none;
+                  border:4px solid #fff; background:#fff; cursor:zoom-out; }
+  .viewer3d { width:100%; height:420px; border:1px solid var(--line);
+              border-radius:8px; background:#fafbfd; touch-action:none;
+              cursor:grab; display:block; }
+  .viewer3d:active { cursor:grabbing; }
+  .viewer-hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  #lightbox .hint { position:fixed; top:12px; right:16px; color:#fff;
+                    font-size:13px; text-shadow:0 1px 3px #000; }
+  .spin { width:14px; height:14px; flex:none; border:2px solid #cbd5e0;
+          border-top-color:var(--accent); border-radius:50%;
+          animation:rot .8s linear infinite; }
+  @keyframes rot { to { transform:rotate(360deg); } }
+
+  /* ---- 结果区(模块②/③ 并列展示) ---- */
+  section.result { margin-top:30px; }
+  section.result > h2 { color:var(--accent); font-size:20px; display:flex; align-items:center; gap:8px; }
+  section.result > h2 .tag { font-size:12px; }
+  .stats { background:#f7fafc; border:1px solid #cbd5e0; border-radius:10px;
+           padding:12px 16px; margin-top:14px; font-size:14px; line-height:1.8; }
+  .stats b { color:#2c5282; }
   .res-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:12px; }
   @media(max-width:760px){ .res-grid{grid-template-columns:1fr;} }
   .res-card { background:var(--card); border-radius:12px; padding:16px 18px;
               box-shadow:0 2px 8px rgba(0,0,0,.05); }
   .res-card .cap { font-size:13px; font-weight:700; color:var(--accent); margin-bottom:10px; }
-  .res-card img { width:100%; border:1px solid #e5e7eb; border-radius:8px; }
-  .tbl-wrap { overflow:auto; max-height:300px; border:1px solid #e5e7eb;
+  .res-card img { width:100%; border:1px solid var(--line); border-radius:8px; cursor:pointer; }
+  .tbl-wrap { overflow:auto; max-height:300px; border:1px solid var(--line);
               border-radius:8px; margin-top:8px; }
   table.tbl { border-collapse:collapse; width:100%; font-size:12px; }
   table.tbl th, table.tbl td { border:1px solid #eef0f2; padding:4px 7px;
@@ -50,159 +121,299 @@
   table.tbl th { background:#edf2f7; color:#2c5282; position:sticky; top:0; }
   table.tbl td:first-child, table.tbl th:first-child { text-align:left; }
   table.tbl tr:nth-child(even) td { background:#fafbfc; }
-  .stats { background:#f7fafc; border:1px solid #cbd5e0; border-radius:10px;
-           padding:12px 16px; margin-top:14px; font-size:14px; line-height:1.8; }
-  .stats b { color:#2c5282; }
   .hidden { display:none; }
 </style>
 </head>
 <body>
-<header>
-  <h1>三维贝塞尔根系重建 · Web 端</h1>
-  <p>两个输入入口：matlab 文件 或 24 张图片+位姿 → 输出重建结果图和数据表</p>
-</header>
-
+<div id="lightbox" class="hidden" onclick="closeLightbox()">
+  <div class="hint">原始分辨率 · 滚动查看 · 点击任意处关闭</div>
+  <img id="lightboxImg" alt="" onclick="event.stopPropagation()">
+</div>
 <main>
-  <!-- 三个输入卡片 -->
+  <!-- 流程引导 -->
+  <div class="stepper">
+    <div class="step">
+      <div class="no">1</div>
+      <div><div class="t">模块① 生成带标记视图</div>
+        <div class="d">上传 .m → 24 张带颜色标记的图 + 位姿</div></div>
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step">
+      <div class="no">2</div>
+      <div><div class="t">模块③ 三维重建</div>
+        <div class="d">模块①的结果可一键导入, 直接重建</div></div>
+    </div>
+    <div class="step-note">模块②为<b>独立入口</b>: 直接从 .m 生成模型与根表, 不依赖模块①; 两条入口的结果会并列展示在下方。</div>
+  </div>
+
   <div class="cards">
-    <!-- 步骤A: matlab -> 24图+位姿 -->
-    <div class="card">
-      <h2>模块① matlab → 24 图 + 位姿</h2>
-      <p class="sub">上传 plantroot06.m → 生成 24 张连续曲线图(15°/张) + 相机位姿文件(JSON)。可作为"模块②"的输入。</p>
-      <div class="drop" id="dropGen" onclick="pick('m2')">点击选择 .m 文件</div>
-      <div class="file-row"><span id="genName" style="color:#68707a">未选择文件</span></div>
+    <!-- 步骤1: matlab -> 24图+位姿 -->
+    <div class="card" id="cardGen">
+      <h2>模块① matlab → 24 图 + 位姿 <span class="tag main">步骤 1</span></h2>
+      <div class="drop" id="dropGen" data-kind="gen">点击或拖入 .m 文件</div>
+      <div class="file-row" id="genPreview"><span style="color:#68707a">未选择文件</span></div>
       <button class="btn" id="btnGen" onclick="submitGenviews()">生成 24 图 + 位姿</button>
       <div class="status" id="statGen"></div>
       <div id="genResult"></div>
     </div>
 
-    <!-- 入口1 -->
-    <div class="card">
-      <h2>模块② matlab 文件</h2>
-      <p class="sub">上传 plantroot06.m 结构脚本 → 生成三维根系模型、根表(节点行+曲线行)、重建图。</p>
-      <div class="drop" id="dropM" onclick="pick('m')">点击选择 .m 文件</div>
-      <div class="file-row">
-        <span id="mName" style="color:#68707a">未选择文件</span>
-      </div>
-      <button class="btn" id="btnM" onclick="submitMatlab()">生成模型与根表</button>
-      <div class="status" id="statM"></div>
+    <!-- 步骤2: 24图+位姿 -> 重建 -->
+    <div class="card" id="cardImg">
+      <h2>模块③ 24 图 + 位姿 → 三维重建 <span class="tag main">步骤 2</span></h2>
+      <p class="sub">上传模块①生成的 24 张视图(cam*.png) + 配套位姿(pose.json, 不传则用默认相机)。<br>
+        注意: 无标记的普通渲染图无法识别; 模块①完成后可<b>一键导入</b>, 无需手动上传。</p>
+      <div class="drop" id="dropImg" data-kind="imgs">点击或拖入 24 张图片(支持多选)</div>
+      <div class="file-row" id="imgsPreview"><span style="color:#68707a">未选择图片</span></div>
+      <div class="drop small" id="dropPose" data-kind="pose">点击或拖入位姿文件(可选, JSON)</div>
+      <div class="file-row" id="posePreview"><span style="color:#68707a">未选择位姿(用默认相机)</span></div>
+      <button class="btn big" id="btnImg" onclick="submitImages()">图片 → 表 → 贝塞尔重建</button>
+      <div class="status" id="statImg"></div>
     </div>
 
-    <!-- 入口2 -->
-    <div class="card">
-      <h2>模块③ 24 张图片 + 位姿</h2>
-      <p class="sub">上传 24 张连续曲线图(15°环视) + 相机位姿文件(JSON, 可选默认为已知参数)。<br>
-        后端用模型几何标色 → 颜色匹配 → 多视角三角化 → 空间坐标表 → 贝塞尔重建。</p>
-      <div class="drop" id="dropI" onclick="pick('imgs')">点击选择 24 张图片(支持多选)</div>
-      <div class="file-row">
-        <span id="imgsCount" style="color:#68707a">未选择图片</span>
-      </div>
-      <div class="file-row">
-        <div class="drop small" id="dropP" onclick="pick('pose')" style="flex:1">
-          点击选择位姿文件(可选, JSON)
+    <!-- 独立入口: matlab -> 模型根表 -->
+    <div class="card wide" id="cardM">
+      <h2>模块② matlab → 模型与根表 <span class="tag alt">独立入口</span></h2>
+      <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start">
+        <div style="flex:1; min-width:260px">
+          <div class="drop" id="dropM" data-kind="m">点击或拖入 .m 文件</div>
+          <div class="file-row" id="mPreview"><span style="color:#68707a">未选择文件</span></div>
         </div>
+        <div><button class="btn" id="btnM" onclick="submitMatlab()">生成模型与根表</button>
+          <div class="status" id="statM"></div></div>
       </div>
-      <div class="file-row"><span id="poseName" style="color:#68707a">未选择位姿(用默认相机)</span></div>
-      <button class="btn" id="btnI" onclick="submitImages()">图片 → 表 → 贝塞尔重建</button>
-      <div class="status" id="statI"></div>
     </div>
   </div>
 
-  <!-- 结果区 -->
-  <section id="result" class="hidden">
-    <h2 id="resTitle">重建结果</h2>
-    <div id="resBody"></div>
+  <!-- 结果区: 模块② 与 模块③ 并列展示 -->
+  <section class="result hidden" id="resultM">
+    <h2>模块② 结果 <span class="tag alt">matlab 直出</span></h2>
+    <div id="resBodyM"></div>
   </section>
-
+  <section class="result hidden" id="resultI">
+    <h2>模块③ 结果 <span class="tag main">图片重建</span></h2>
+    <div id="resBodyI"></div>
+  </section>
 </main>
 
 <script>
 let mFile = null, imgFiles = [], poseFile = null, genFile = null;
+let imgThumbUrls = [];
+
+/* ---------- 状态辅助 ---------- */
+function setBusy(statId, btnId, busy, text){
+  const stat = document.getElementById(statId), btn = document.getElementById(btnId);
+  btn.disabled = busy;
+  if (busy){ stat.className='status'; stat.innerHTML = '<span class="spin"></span>' + text; }
+}
+function fmtSize(b){ return b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(1)+' KB'; }
+function chip(name, size){ return `<span class="file-chip"><b>${name}</b>${size!=null? ' · '+fmtSize(size):''}</span>`; }
+
+/* ---------- 任务轮询: POST 拿 job_id, 每次进度回调 onProgress ---------- */
+async function pollJob(jid, onProgress){
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(async () => {
+      let j;
+      try{
+        const r = await fetch('/api/job/' + jid);
+        j = await r.json();
+      }catch(e){ return; }  // 瞬时网络错误, 继续轮询
+      try{ onProgress(j); }catch(e){}
+      if (j.status === 'done'){ clearInterval(timer); resolve(j.result); }
+      else if (j.status === 'error'){ clearInterval(timer); reject(new Error(j.error)); }
+    }, 400);
+  });
+}
+/* 状态区: 旋转圈 + 阶段文字 + 进度条 */
+function setProgress(statId, stage, done, total){
+  const stat = document.getElementById(statId);
+  stat.className = 'status';
+  const pct = total > 0 ? Math.round(done / total * 100) : 0;
+  stat.innerHTML = `<span class="spin"></span><b>${stage}</b> ${done}/${total}
+    <span class="pbar"><i style="width:${pct}%"></i></span>`;
+}
+
+/* ---------- 文件选择 / 拖拽 ---------- */
+function handleFiles(kind, files){
+  if (kind === 'gen' && files[0]){ genFile = files[0];
+    document.getElementById('genPreview').innerHTML = chip(genFile.name, genFile.size); }
+  else if (kind === 'm' && files[0]){ mFile = files[0];
+    document.getElementById('mPreview').innerHTML = chip(mFile.name, mFile.size); }
+  else if (kind === 'imgs'){ setImgFiles(Array.from(files).filter(f=>f.type.startsWith('image/'))); }
+  else if (kind === 'pose' && files[0]){ poseFile = files[0];
+    document.getElementById('posePreview').innerHTML =
+      chip(poseFile.name, poseFile.size) + '<span style="color:#68707a">点击可重新选择</span>'; }
+}
 
 function pick(kind){
   const inp = document.createElement('input');
   inp.type = 'file';
-  if(kind === 'm'){ inp.accept='.m'; inp.onchange = e=>{ mFile=e.target.files[0];
-    document.getElementById('mName').textContent = mFile? mFile.name : '未选择'; }; }
-  else if(kind === 'm2'){ inp.accept='.m'; inp.onchange = e=>{ genFile=e.target.files[0];
-    document.getElementById('genName').textContent = genFile? genFile.name : '未选择'; }; }
-  else if(kind === 'imgs'){ inp.accept='image/*'; inp.multiple=true;
-    inp.onchange = e=>{ imgFiles=Array.from(e.target.files);
-      document.getElementById('imgsCount').textContent = imgFiles.length + ' 张'; }; }
-  else { inp.accept='.json'; inp.onchange = e=>{ poseFile=e.target.files[0];
-    document.getElementById('poseName').textContent = poseFile? poseFile.name : '未选择(默认)'; }; }
+  if (kind === 'gen' || kind === 'm') inp.accept = '.m';
+  else if (kind === 'imgs'){ inp.accept = 'image/*'; inp.multiple = true; }
+  else inp.accept = '.json';
+  inp.onchange = e => handleFiles(kind, e.target.files);
   inp.click();
 }
 
+document.querySelectorAll('.drop').forEach(d => {
+  d.addEventListener('click', () => pick(d.dataset.kind));
+  d.addEventListener('dragover', e => { e.preventDefault(); d.classList.add('over'); });
+  d.addEventListener('dragleave', () => d.classList.remove('over'));
+  d.addEventListener('drop', e => { e.preventDefault(); d.classList.remove('over');
+    handleFiles(d.dataset.kind, e.dataTransfer.files); });
+});
+
+function setImgFiles(files){
+  imgThumbUrls.forEach(u => URL.revokeObjectURL(u));
+  imgThumbUrls = []; imgFiles = files;
+  const box = document.getElementById('imgsPreview');
+  if (!imgFiles.length){ box.innerHTML = '<span style="color:#68707a">未选择图片</span>'; return; }
+  let h = chip(imgFiles.length + ' 张图片', imgFiles.reduce((s,f)=>s+f.size,0));
+  const maxShow = Math.min(imgFiles.length, 12);
+  let th = '';
+  for (let i = 0; i < maxShow; i++){
+    const u = URL.createObjectURL(imgFiles[i]); imgThumbUrls.push(u);
+    th += `<img src="${u}" title="${imgFiles[i].name} (双击查看原图)" ondblclick="showOriginal('${u}')">`;
+  }
+  box.innerHTML = h + (imgFiles.length > maxShow
+    ? `<span style="color:#68707a;font-size:12px">… 共 ${imgFiles.length} 张</span>` : '')
+    + `<div class="thumbs">${th}</div>`;
+}
+
+/* ---------- 模块① -> 模块③ 一键导入 ---------- */
+async function importGenToImages(data){
+  const nViews = parseInt(data.stats['视角数']) || 24;
+  const files = [];
+  for (let i = 0; i < nViews; i++){
+    const r = await fetch(`${data.view_dir}/cam${i}.png`);
+    if (!r.ok) break;
+    files.push(new File([await r.blob()], `cam${i}.png`, {type:'image/png'}));
+  }
+  const pr = await fetch(data.pose_file);
+  poseFile = new File([await pr.blob()], 'pose.json', {type:'application/json'});
+  setImgFiles(files);
+  document.getElementById('posePreview').innerHTML =
+    `<span class="imported">✓ 已导入模块①的配套位姿</span>`;
+  const stat = document.getElementById('statImg');
+  stat.className = 'status ok';
+  stat.innerHTML = `已从模块①导入 ${files.length} 张图 + 位姿, 点击下方按钮开始重建`;
+  const btn = document.getElementById('btnImg');
+  btn.classList.remove('flash'); void btn.offsetWidth; btn.classList.add('flash');
+  document.getElementById('cardImg').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+/* ---------- 通用 ---------- */
 function fileToB64(f){ return new Promise((res,rej)=>{
   const r = new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(f); }); }
 
-// 下载服务器上的文件(url)到本地
 async function downloadFile(url, name){
+  const fname = name || url.split('/').pop();
   try{
     const resp = await fetch(url);
     const blob = await resp.blob();
+    const bridge = window.pywebview && window.pywebview.api;
+    if (bridge && bridge.save_file){
+      const dataUrl = await new Promise((res,rej)=>{
+        const r = new FileReader();
+        r.onload = ()=>res(r.result); r.onerror=rej;
+        r.readAsDataURL(blob);
+      });
+      const st = await bridge.save_file(fname, dataUrl);
+      if (st === 'cancelled') return;
+      if (st !== 'saved') throw new Error(st);
+      return;
+    }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = name || url.split('/').pop();
+    a.download = fname;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
   }catch(e){ alert('下载失败: '+e.message); }
 }
 
+/* ---------- 原图查看 ---------- */
+function showOriginal(url){
+  const lb = document.getElementById('lightbox');
+  document.getElementById('lightboxImg').src = url;
+  lb.classList.remove('hidden');
+  lb.scrollTop = 0;
+}
+function closeLightbox(){
+  const lb = document.getElementById('lightbox');
+  lb.classList.add('hidden');
+  document.getElementById('lightboxImg').src = '';
+}
+
+/* ---------- 模块①: 逐张流式出图 ---------- */
 async function submitGenviews(){
   const stat = document.getElementById('statGen');
   const box = document.getElementById('genResult');
-  stat.className='status'; stat.textContent='生成中...'; box.innerHTML='';
-  const btn = document.getElementById('btnGen'); btn.disabled=true;
+  const btn = document.getElementById('btnGen');
+  setBusy('statGen','btnGen',true,'提交中...');
+  box.innerHTML = '';
   try{
     if(!genFile) throw new Error('请先选择 .m 文件');
     const b64 = await fileToB64(genFile);
     const resp = await fetch('/api/gen_views', { method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({ file: b64 }) });
-    const data = await resp.json();
-    if(!data.ok) throw new Error(data.error);
-    stat.className='status ok'; stat.textContent='完成 ✓ 已在服务器生成 24 张图 + 位姿文件';
-    // 展示全部 24 张图 + 位姿文件下载
-    let h = `<div class="stats">` +
-      Object.entries(data.stats||{}).map(([k,v])=>`<b>${k}</b>: ${v}　`).join('') + `</div>`;
-    let thumbs = '';
-    for(let i=0;i<24;i++){
-      thumbs += `<img src="${data.view_dir}/cam${i}.png" style="width:64px;height:64px;object-fit:cover;border:1px solid #e5e7eb;border-radius:6px;margin:3px;cursor:pointer;vertical-align:top" title="点击下载" onclick="downloadFile('${data.view_dir}/cam${i}.png','cam${i}.png')">`;
-    }
-    h += `<div style="margin-top:10px;display:flex;flex-wrap:wrap">${thumbs}</div>`;
-    h += `<div class="file-row" style="margin-top:12px">
-      <button class="btn" style="margin:0" onclick="downloadFile('${data.zip_url}','plantroot_views.zip')">下载 24 图 + 位姿(ZIP)</button>
-      <button class="btn" style="margin:0;background:#718096" onclick="downloadFile('${data.pose_file}','pose.json')">只下位姿</button>
-      <span style="font-size:12px;color:#68707a">缩略图点击可单张下载</span>
-    </div>`;
-    box.innerHTML = h;
+    const job = await resp.json();
+    if(!job.ok) throw new Error(job.error);
+    const n = job.n_views, urls = job.urls;
+    // 24 个占位格, 每生成一张点亮一张
+    let slots = '';
+    for(let i=0;i<n;i++) slots += `<div class="slot" id="slot${i}">${i+1}</div>`;
+    box.innerHTML = `<div class="slots">${slots}</div>
+      <div class="file-row hidden" id="genActions"></div>`;
+    const result = await pollJob(job.job_id, j => {
+      setProgress('statGen', j.stage, j.done, j.total);
+      if (j.stage === '生成视图'){
+        for(let i=0;i<j.done;i++){
+          const slot = document.getElementById('slot'+i);
+          if (slot && !slot.dataset.done){
+            slot.dataset.done = '1';
+            slot.outerHTML = `<img class="v" src="${urls.view_dir}/cam${i}.png"
+              title="双击查看原图" ondblclick="showOriginal('${urls.view_dir}/cam${i}.png')">`;
+          }
+        }
+      }
+    });
+    // 完成: 显示下载 + 一键导入
+    window.__genData = result;
+    const actions = document.getElementById('genActions');
+    actions.innerHTML = `
+      <button class="btn" style="margin:0" onclick="downloadFile('${result.zip_url}','plantroot_views.zip')">下载 24 图 + 位姿(ZIP)</button>
+      <button class="btn ghost" style="margin:0" onclick="downloadFile('${result.pose_file}','pose.json')">只下位姿</button>
+      <button class="btn big" style="margin:0" onclick="importGenToImages(window.__genData)">⬇ 一键导入模块③</button>`;
+    actions.classList.remove('hidden');
+    stat.className='status ok'; stat.textContent='完成 ✓ 共生成 '+n+' 张视图 + 位姿文件';
   }catch(e){ stat.className='status error'; stat.textContent='失败: '+e.message; }
   finally{ btn.disabled=false; }
 }
 
+/* ---------- 模块② ---------- */
 async function submitMatlab(){
-  const stat = document.getElementById('statM');
-  stat.className='status'; stat.textContent='处理中...';
-  const btn = document.getElementById('btnM'); btn.disabled=true;
+  setBusy('statM','btnM',true,'提交中...');
   try{
     if(!mFile) throw new Error('请先选择 .m 文件');
     const b64 = await fileToB64(mFile);
     const resp = await fetch('/api/from_matlab', { method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ file: b64 }) });
-    const data = await resp.json();
-    if(!data.ok) throw new Error(data.error);
+    const job = await resp.json();
+    if(!job.ok) throw new Error(job.error);
+    const data = await pollJob(job.job_id, j => setProgress('statM', j.stage, j.done, j.total));
+    const stat = document.getElementById('statM');
     stat.className='status ok'; stat.textContent='完成 ✓ 曲线数='+data.stats['曲线数']+' 节点数='+data.stats['节点数'];
-    showResult('入口① matlab 重建结果', data, 'matlab');
-  }catch(e){ stat.className='status error'; stat.textContent='失败: '+e.message; }
-  finally{ btn.disabled=false; }
+    showResult('resultM','resBodyM', data, 'matlab',
+      [['重建图', data.image, 'model_rebuilt_3d.png'],
+       ['根表(CSV)', data.table_csv, 'root_table.csv']],
+      [['#tblHoldermatlab1', data.table_csv]]);
+  }catch(e){ const s=document.getElementById('statM'); s.className='status error'; s.textContent='失败: '+e.message; }
+  finally{ document.getElementById('btnM').disabled=false; }
 }
 
+/* ---------- 模块③ ---------- */
 async function submitImages(){
-  const stat = document.getElementById('statI');
-  stat.className='status'; stat.textContent='处理中...';
-  const btn = document.getElementById('btnI'); btn.disabled=true;
+  setBusy('statImg','btnImg',true,'提交中...');
   try{
     if(imgFiles.length===0) throw new Error('请先选择图片');
     const images = [];
@@ -212,14 +423,22 @@ async function submitImages(){
     const resp = await fetch('/api/from_images', { method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ images, pose }) });
-    const data = await resp.json();
-    if(!data.ok) throw new Error(data.error);
+    const job = await resp.json();
+    if(!job.ok) throw new Error(job.error);
+    const data = await pollJob(job.job_id, j => setProgress('statImg', j.stage, j.done, j.total));
+    const stat = document.getElementById('statImg');
     stat.className='status ok'; stat.textContent='完成 ✓ 曲线数='+data.stats['曲线数']+' 成功三角化='+data.stats['成功三角化'];
-    showResult('入口② 图片重建结果', data, 'images');
-  }catch(e){ stat.className='status error'; stat.textContent='失败: '+e.message; }
-  finally{ btn.disabled=false; }
+    showResult('resultI','resBodyI', data, 'images',
+      [['重建图', data.image, 'rebuilt_from_table.png'],
+       ['空间坐标表', data.points_table, 'reconstructed_points.csv'],
+       ['对比图(左原/右重建)', data.compare, 'rebuilt_vs_orig_cam0.png'],
+       ['贝塞尔定义点表', data.control_table, 'control_points.csv']],
+      [['#tblHolderimages1', data.points_table], ['#tblHolderimages3', data.control_table]]);
+  }catch(e){ const s=document.getElementById('statImg'); s.className='status error'; s.textContent='失败: '+e.message; }
+  finally{ document.getElementById('btnImg').disabled=false; }
 }
 
+/* ---------- 结果渲染(②③并列, 各自独立容器) ---------- */
 async function loadCSV(url){
   const r = await fetch(url); return r.text();
 }
@@ -231,36 +450,132 @@ function csvToHTML(csvText, maxRows=40){
   return `<div class="tbl-wrap"><table class="tbl"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`;
 }
 
-async function showResult(title, data, kind){
-  document.getElementById('resTitle').textContent = title;
-  document.getElementById('result').classList.remove('hidden');
-  const body = document.getElementById('resBody');
+function dlBtn(url, name){
+  return `<button class="btn ghost" style="float:right;padding:3px 10px;font-size:12px" onclick="downloadFile('${url}','${name}')">下载</button>`;
+}
+function imgCard(cap, url, name){
+  return `<div class="res-card"><div class="cap">${cap} ${dlBtn(url,name)}</div><img src="${url}" title="双击查看原图" ondblclick="showOriginal('${url}')"></div>`;
+}
+function tblCard(cap, url, name, holder){
+  return `<div class="res-card"><div class="cap">${cap} ${dlBtn(url,name)}</div><div id="${holder}">加载中...</div></div>`;
+}
+
+async function showResult(secId, bodyId, data, kind, cards, csvs){
+  document.getElementById(secId).classList.remove('hidden');
+  const body = document.getElementById(bodyId);
   let statsHtml = `<div class="stats">` +
     Object.entries(data.stats||{}).map(([k,v])=>`<b>${k}</b>: ${v}　`).join('') + `</div>`;
-
-  let html = statsHtml;
-  if(kind==='matlab'){
-    html += `<div class="res-grid">
-      <div class="res-card"><div class="cap">重建图 <button class="btn" style="float:right;padding:3px 10px;font-size:12px;background:#718096" onclick="downloadFile('${data.image}','model_rebuilt_3d.png')">下载</button></div><img src="${data.image}" onclick="downloadFile('${data.image}','model_rebuilt_3d.png')"></div>
-      <div class="res-card"><div class="cap">根表(CSV) <button class="btn" style="float:right;padding:3px 10px;font-size:12px;background:#718096" onclick="downloadFile('${data.table_csv}','root_table.csv')">下载</button></div><div id="tblMCsv">加载中...</div></div>
+  let html = statsHtml + `<div class="res-grid">`;
+  // cards: 偶数索引=图片卡, 奇数索引=表格卡, 两列交错
+  cards.forEach((c, i) => {
+    html += (i % 2 === 0)
+      ? imgCard(c[0], c[1], c[2])
+      : tblCard(c[0], c[1], c[2], 'tblHolder' + kind + i);
+  });
+  html += `</div>`;
+  if (data.model3d){
+    html += `<div class="res-card" style="margin-top:16px">
+      <div class="cap">3D 模型 · 可交互</div>
+      <canvas id="viewer_${kind}" class="viewer3d"></canvas>
+      <div class="viewer-hint">按住拖动旋转视角 · 滚轮缩放</div>
     </div>`;
-    const csvTxt = await loadCSV(data.table_csv);
-    html = html.replace('<div id="tblMCsv">加载中...</div>', csvToHTML(csvTxt));
-  } else {
-    html += `<div class="res-grid">
-      <div class="res-card"><div class="cap">重建图 <button class="btn" style="float:right;padding:3px 10px;font-size:12px;background:#718096" onclick="downloadFile('${data.image}','rebuilt_from_table.png')">下载</button></div><img src="${data.image}" onclick="downloadFile('${data.image}','rebuilt_from_table.png')"></div>
-      <div class="res-card"><div class="cap">空间坐标表 <button class="btn" style="float:right;padding:3px 10px;font-size:12px;background:#718096" onclick="downloadFile('${data.points_table}','reconstructed_points.csv')">下载</button></div><div id="tblPt">加载中...</div></div>
-    </div>
-    <div class="res-grid" style="margin-top:16px">
-      <div class="res-card"><div class="cap">对比图(左原/右重建) <button class="btn" style="float:right;padding:3px 10px;font-size:12px;background:#718096" onclick="downloadFile('${data.compare}','rebuilt_vs_orig_cam0.png')">下载</button></div><img src="${data.compare}" onclick="downloadFile('${data.compare}','rebuilt_vs_orig_cam0.png')"></div>
-      <div class="res-card"><div class="cap">贝塞尔定义点表 <button class="btn" style="float:right;padding:3px 10px;font-size:12px;background:#718096" onclick="downloadFile('${data.control_table}','control_points.csv')">下载</button></div><div id="tblCtrl">加载中...</div></div>
-    </div>`;
-    const pt = await loadCSV(data.points_table);
-    const ct = await loadCSV(data.control_table);
-    html = html.replace('<div id="tblPt">加载中...</div>', csvToHTML(pt));
-    html = html.replace('<div id="tblCtrl">加载中...</div>', csvToHTML(ct));
   }
   body.innerHTML = html;
+  if (data.model3d) initModelViewer(data.model3d, 'viewer_' + kind);
+  for (const [holder, url] of csvs){
+    const target = body.querySelector(holder);
+    if (target) target.innerHTML = csvToHTML(await loadCSV(url));
+  }
+  document.getElementById(secId).scrollIntoView({behavior:'smooth', block:'start'});
+}
+/* ---------- 3D 交互查看器(原生 Canvas, 拖动旋转/滚轮缩放) ---------- */
+function initModelViewer(jsonUrl, canvasId){
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  fetch(jsonUrl).then(r => r.json()).then(model => {
+    const curves = model.curves || [];
+    if (!curves.length) return;
+    // 自动取景: 归一化到单位立方
+    const mn = [1e9,1e9,1e9], mx = [-1e9,-1e9,-1e9];
+    curves.forEach(c => c.pts.forEach(p => {
+      for (let i = 0; i < 3; i++){
+        if (p[i] < mn[i]) mn[i] = p[i];
+        if (p[i] > mx[i]) mx[i] = p[i];
+      }
+    }));
+    const ctr = [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2];
+    const span = Math.max(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2], 1e-6);
+    const norm = curves.map(c => ({
+      pts: c.pts.map(p => [(p[0]-ctr[0])/span, (p[1]-ctr[1])/span, (p[2]-ctr[2])/span]),
+      r: c.r.map(v => v/span)
+    }));
+    let yaw = -1.36, pitch = 0.9, zoom = 1;
+    let dragging = false, lx = 0, ly = 0, raf = null;
+
+    function draw(){
+      raf = null;
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.clientWidth * dpr, H = canvas.clientHeight * dpr;
+      if (canvas.width !== W || canvas.height !== H){ canvas.width = W; canvas.height = H; }
+      const g = canvas.getContext('2d');
+      g.setTransform(1,0,0,1,0,0);
+      g.clearRect(0, 0, W, H);
+      const sc = 0.8 * Math.min(W, H) * zoom;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const segs = [];
+      for (const c of norm){
+        const P = c.pts.map(p => {
+          const x1 = p[0]*cy - p[1]*sy, y1 = p[0]*sy + p[1]*cy;
+          const y2 = y1*cp - p[2]*sp, z2 = y1*sp + p[2]*cp;
+          return { sx: W/2 + x1*sc, sy: H/2 + y2*sc, d: z2 };
+        });
+        for (let i = 0; i < P.length - 1; i++){
+          segs.push({ a: P[i], b: P[i+1], r: (c.r[i]+c.r[i+1])/2,
+                      d: (P[i].d + P[i+1].d)/2 });
+        }
+      }
+      segs.sort((u, v) => u.d - v.d);   // 远的先画
+      g.lineCap = 'round'; g.lineJoin = 'round';
+      for (const s of segs){
+        const sh = Math.max(0.5, Math.min(1, 0.8 - s.d*0.3));
+        g.strokeStyle = `rgb(${Math.round(224*sh)},${Math.round(67*sh)},${Math.round(58*sh)})`;
+        g.lineWidth = Math.max(1, s.r*2*sc);
+        g.beginPath(); g.moveTo(s.a.sx, s.a.sy); g.lineTo(s.b.sx, s.b.sy); g.stroke();
+      }
+      // 原点标记(绿色)
+      const ox = 0*cy - 0*sy, oy1 = 0*sy + 0*cy;
+      const oy2 = oy1*cp - 0*sp, oz2 = oy1*sp + 0*cp;
+      g.fillStyle = '#2f855a';
+      g.beginPath(); g.arc(W/2 + ox*sc, H/2 + oy2*sc, 4*dpr, 0, Math.PI*2); g.fill();
+    }
+    function requestDraw(){ if (!raf) raf = requestAnimationFrame(draw); }
+
+    canvas.addEventListener('mousedown', e => {
+      dragging = true; lx = e.clientX; ly = e.clientY; });
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      yaw += (e.clientX - lx) * 0.01;
+      pitch = Math.max(-1.45, Math.min(1.45, pitch + (e.clientY - ly) * 0.01));
+      lx = e.clientX; ly = e.clientY; requestDraw(); });
+    window.addEventListener('mouseup', () => dragging = false);
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      zoom = Math.max(0.3, Math.min(8, zoom * (e.deltaY < 0 ? 1.12 : 1/1.12)));
+      requestDraw(); }, { passive: false });
+    // 触屏: 单指旋转
+    canvas.addEventListener('touchstart', e => {
+      if (e.touches.length === 1){ dragging = true; lx = e.touches[0].clientX; ly = e.touches[0].clientY; } });
+    canvas.addEventListener('touchmove', e => {
+      if (!dragging || e.touches.length !== 1) return;
+      e.preventDefault();
+      yaw += (e.touches[0].clientX - lx) * 0.01;
+      pitch = Math.max(-1.45, Math.min(1.45, pitch + (e.touches[0].clientY - ly) * 0.01));
+      lx = e.touches[0].clientX; ly = e.touches[0].clientY; requestDraw(); });
+    canvas.addEventListener('touchend', () => dragging = false);
+    window.addEventListener('resize', requestDraw);
+    draw();
+  }).catch(() => {});
 }
 </script>
 </body>

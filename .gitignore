@@ -31,3 +31,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# 桌面版构建产物与本地环境
+build/
+dist/
+.venv-desktop/
+.playwright-cli/

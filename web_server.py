@@ -11,14 +11,31 @@ web_server.py
 """
 import os
 import io
+import sys
 import json
+import uuid
 import base64
 import shutil
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def resource_path(rel):
+    """解析随程序分发的资源路径(兼容 PyInstaller 冻结模式)。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
 
 # 生成的结果放在这个目录
 RESULT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(RESULT_DIR, exist_ok=True)
+
+
+def set_result_dir(path):
+    """重定向结果目录(桌面版指向用户可写目录)。"""
+    global RESULT_DIR
+    RESULT_DIR = path
+    os.makedirs(RESULT_DIR, exist_ok=True)
 
 
 def save_b64_to_file(b64, path):
@@ -32,11 +49,60 @@ def save_b64_to_file(b64, path):
     return path
 
 
+# ---- 后台任务管理: POST 立即返回 job_id, 前端轮询 /api/job/<id> 取进度 ----
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+
+def _new_job():
+    jid = uuid.uuid4().hex[:12]
+    with JOBS_LOCK:
+        JOBS[jid] = {'status': 'running', 'stage': '准备中', 'done': 0, 'total': 0,
+                     'urls': {}, 'result': None, 'error': None}
+    return jid
+
+
+def _job_progress_cb(jid):
+    def cb(stage, done, total):
+        with JOBS_LOCK:
+            j = JOBS.get(jid)
+            if j:
+                j.update(stage=stage, done=done, total=total)
+    return cb
+
+
+def _run_job(jid, fn):
+    def target():
+        try:
+            res = fn()
+            with JOBS_LOCK:
+                JOBS[jid]['status'] = 'done'
+                JOBS[jid]['result'] = res
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            with JOBS_LOCK:
+                JOBS[jid]['status'] = 'error'
+                JOBS[jid]['error'] = str(e)
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    return t
+
+
 class Handler(BaseHTTPRequestHandler):
     # ---- 静态资源(前端) ----
     def do_GET(self):
+        if self.path.startswith('/api/job/'):
+            jid = self.path[len('/api/job/'):]
+            with JOBS_LOCK:
+                j = JOBS.get(jid)
+                if j:
+                    self._json(200, dict(j))
+                else:
+                    self._json(404, {"error": "任务不存在"})
+            return
         if self.path == '/' or self.path == '/index.html':
-            self._serve_file("templates/index.html", "text/html; charset=utf-8")
+            self._serve_file(resource_path("templates/index.html"), "text/html; charset=utf-8")
         elif self.path.startswith('/api/zip_views/'):
             # 把该 job 的 24 张图 + pose.json 打包成 ZIP 下载
             job = os.path.basename(self.path[len('/api/zip_views/'):])
@@ -88,22 +154,30 @@ class Handler(BaseHTTPRequestHandler):
             m_b64 = payload.get('file')
             if not m_b64:
                 raise ValueError("缺少 matlab 文件(file)")
-            outdir = os.path.join(RESULT_DIR, "job_matlab")
+            jid = _new_job()
+            outdir = os.path.join(RESULT_DIR, f"job_matlab_{jid[:8]}")
             os.makedirs(outdir, exist_ok=True)
             m_path = save_b64_to_file(m_b64, os.path.join(outdir, "model.m"))
+            with JOBS_LOCK:
+                JOBS[jid]['urls'] = {}
 
-            # 延迟导入, 避免服务器启动即计算
-            from web_core_matlab import run_matlab_pipeline
-            res = run_matlab_pipeline(m_path, outdir)
+            def work():
+                from web_core_matlab import run_matlab_pipeline
+                res = run_matlab_pipeline(m_path, outdir,
+                                          progress_cb=_job_progress_cb(jid))
+                base = os.path.basename(outdir)
+                return {
+                    "ok": True,
+                    "stats": {"曲线数": res['curves'], "节点数": res['nodes'],
+                              "参数": res['params']},
+                    "table_csv": f"/results/{base}/root_table.csv",
+                    "table_sql": f"/results/{base}/root_table.sql",
+                    "image": f"/results/{base}/model_rebuilt_3d.png",
+                    "model3d": f"/results/{base}/model3d.json",
+                }
 
-            self._json(200, {
-                "ok": True,
-                "stats": {"曲线数": res['curves'], "节点数": res['nodes'],
-                          "参数": res['params']},
-                "table_csv": "/results/job_matlab/root_table.csv",
-                "table_sql": "/results/job_matlab/root_table.sql",
-                "image": "/results/job_matlab/model_rebuilt_3d.png",
-            })
+            _run_job(jid, work)
+            self._json(200, {"ok": True, "job_id": jid, "urls": {}})
         except Exception as e:
             import traceback; traceback.print_exc()
             self._json(500, {"error": str(e)})
@@ -114,10 +188,11 @@ class Handler(BaseHTTPRequestHandler):
             imgs = payload.get('images')   # list of base64
             if not imgs or len(imgs) == 0:
                 raise ValueError("缺少图片(images)")
-            outdir = os.path.join(RESULT_DIR, "job_images")
+            jid = _new_job()
+            outdir = os.path.join(RESULT_DIR, f"job_images_{jid[:8]}")
             os.makedirs(outdir, exist_ok=True)
 
-            # 存24张图 -> imgdir
+            # 存所有图 -> imgdir
             imgdir = os.path.join(outdir, "input_imgs")
             os.makedirs(imgdir, exist_ok=True)
             for i, b64 in enumerate(imgs):
@@ -127,49 +202,69 @@ class Handler(BaseHTTPRequestHandler):
             pose = None
             pose_b64 = payload.get('pose')
             if pose_b64:
-                import io
                 pose_data = base64.b64decode(
                     pose_b64.split(',', 1)[1] if pose_b64.startswith('data:') else pose_b64)
                 pose = json.loads(pose_data.decode('utf-8'))
 
-            from web_core_images import run_images_pipeline
-            res = run_images_pipeline(imgdir, outdir, pose=pose)
+            with JOBS_LOCK:
+                JOBS[jid]['urls'] = {}
 
-            self._json(200, {
-                "ok": True,
-                "stats": res['stats'],
-                "points_table": "/results/job_images/reconstructed_points.csv",
-                "control_table": "/results/job_images/control_points.csv",
-                "root_table": "/results/job_images/root_table.csv",
-                "root_sql": "/results/job_images/root_table.sql",
-                "image": "/results/job_images/rebuilt_from_table.png",
-                "compare": "/results/job_images/rebuilt_vs_orig_cam0.png",
-            })
+            def work():
+                from web_core_images import run_images_pipeline
+                res = run_images_pipeline(imgdir, outdir, pose=pose,
+                                          progress_cb=_job_progress_cb(jid))
+                base = os.path.basename(outdir)
+                return {
+                    "ok": True,
+                    "stats": res['stats'],
+                    "points_table": f"/results/{base}/reconstructed_points.csv",
+                    "control_table": f"/results/{base}/control_points.csv",
+                    "root_table": f"/results/{base}/root_table.csv",
+                    "root_sql": f"/results/{base}/root_table.sql",
+                    "image": f"/results/{base}/rebuilt_from_table.png",
+                    "compare": f"/results/{base}/rebuilt_vs_orig_cam0.png",
+                    "model3d": f"/results/{base}/model3d.json",
+                }
+
+            _run_job(jid, work)
+            self._json(200, {"ok": True, "job_id": jid, "urls": {}})
         except Exception as e:
             import traceback; traceback.print_exc()
             self._json(500, {"error": str(e)})
 
-    # ---- 生成 24图+位姿 (matlab -> 24图+pose) ----
+    # ---- 生成 24图+位姿 (matlab -> 24图+pose), 逐张落盘供流式展示 ----
     def _handle_genviews(self, payload):
         try:
             m_b64 = payload.get('file')
             if not m_b64:
                 raise ValueError("缺少 matlab 文件(file)")
-            outdir = os.path.join(RESULT_DIR, "job_genviews")
+            jid = _new_job()
+            outdir = os.path.join(RESULT_DIR, f"job_genviews_{jid[:8]}")
             os.makedirs(outdir, exist_ok=True)
             m_path = save_b64_to_file(m_b64, os.path.join(outdir, "model.m"))
+            base = os.path.basename(outdir)
+            urls = {"view_dir": f"/results/{base}/views",
+                    "pose_file": f"/results/{base}/pose.json",
+                    "zip_url": f"/api/zip_views/{base}"}
+            with JOBS_LOCK:
+                JOBS[jid]['urls'] = urls
 
-            from web_core_genviews import generate_views_from_matlab
-            res = generate_views_from_matlab(m_path, outdir)
+            def work():
+                from web_core_genviews import generate_views_from_matlab
+                res = generate_views_from_matlab(m_path, outdir,
+                                                 progress_cb=_job_progress_cb(jid))
+                return {
+                    "ok": True,
+                    "stats": {"曲线数": res['curves'], "节点数": res['nodes'],
+                              "视角数": res['n_views'], "每度": f"{res['step_deg']:g}°/张"},
+                    "view_dir": urls['view_dir'],
+                    "pose_file": urls['pose_file'],
+                    "zip_url": urls['zip_url'],
+                }
 
-            self._json(200, {
-                "ok": True,
-                "stats": {"曲线数": res['curves'], "节点数": res['nodes'],
-                          "视角数": res['n_views'], "每度": f"{res['step_deg']:g}°/张"},
-                "view_dir": "/results/job_genviews/views",
-                "pose_file": "/results/job_genviews/pose.json",
-                "zip_url": "/api/zip_views/job_genviews",
-            })
+            _run_job(jid, work)
+            self._json(200, {"ok": True, "job_id": jid,
+                             "n_views": 24, "urls": urls})
         except Exception as e:
             import traceback; traceback.print_exc()
             self._json(500, {"error": str(e)})
@@ -226,9 +321,15 @@ class Handler(BaseHTTPRequestHandler):
         pass  # 静默
 
 
+def start_server(host="127.0.0.1", port=8090):
+    """启动服务器并返回实例(桌面版用随机端口时传 port=0)。"""
+    srv = ThreadingHTTPServer((host, port), Handler)
+    return srv
+
+
 def main():
     host, port = "127.0.0.1", 8090
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = start_server(host, port)
     print(f"Web 服务已启动: http://{host}:{port}")
     print("入口1: /api/from_matlab  ;  入口2: /api/from_images")
     srv.serve_forever()

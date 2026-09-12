@@ -223,9 +223,16 @@ def estimate_radius_3d(r_pix_list, cams_list, X):
     return float(np.median(est)) if est else None
 
 
-def run_images_pipeline(imgdir, outdir, pose=None):
+def run_images_pipeline(imgdir, outdir, pose=None, progress_cb=None):
     """从上传的带标记图目录 + 相机位姿(默认或 pose.json) -> 检测->三角化->表->贝塞尔图。
-    返回 stats 与文件路径 dict。"""
+    返回 stats 与文件路径 dict。progress_cb(stage, done, total): 阶段进度。"""
+    def _cb(stage, done, total):
+        if progress_cb:
+            try:
+                progress_cb(stage, done, total)
+            except Exception:
+                pass
+
     os.makedirs(outdir, exist_ok=True)
     cams, nviews = build_cams(pose)
     # 标记约定元数据(模块①写入 pose.json; 缺省按默认参数)
@@ -251,13 +258,22 @@ def run_images_pipeline(imgdir, outdir, pose=None):
     n_have = sum(1 for im in imgs if im is not None)
     dets = [[None] * nviews for _ in range(n_targets)]     # [ti][vi] = uv
     rpix = [[None] * nviews for _ in range(n_targets)]     # [ti][vi] = 像素半径
+    n_dets = 0
     for vi in range(nviews):
         if imgs[vi] is None:
+            _cb("检测标记", vi + 1, nviews)
             continue
         blobs = detect_palette_blobs(imgs[vi], palette)
         for ti in range(n_targets):
             if blobs[ti] is not None:
                 dets[ti][vi], rpix[ti][vi] = blobs[ti]
+                n_dets += 1
+        _cb("检测标记", vi + 1, nviews)
+    if n_dets == 0:
+        raise ValueError(
+            "上传的图片中没有检测到任何颜色标记点。模块③需要模块①生成的"
+            "带标记视图(ZIP 中的 cam*.png, 曲线上有彩色圆点); 普通曲线渲染图"
+            "无法按标记三角化。请在模块①重新生成后下载 ZIP 再上传。")
 
     # [2] 三角化(迭代剔除坏视角 + cheirality 正深度校验, P1-5) + 半径反演
     from triangulate import triangulate_robust
@@ -266,6 +282,8 @@ def run_images_pipeline(imgdir, outdir, pose=None):
     kept_views = [set() for _ in range(n_targets)]
     kept_resids = [[] for _ in range(n_targets)]
     for ti in range(n_targets):
+        if ti % 12 == 0:
+            _cb("多视角三角化", ti, n_targets)
         seen = [(vi, dets[ti][vi]) for vi in range(nviews) if dets[ti][vi] is not None]
         if len(seen) < 2:
             continue
@@ -324,7 +342,9 @@ def run_images_pipeline(imgdir, outdir, pose=None):
             (tp['t_index'], rec[ti], rad3d[ti]))
     for cid in curves:
         curves[cid].sort(key=lambda x: x[0])
+    n_curves_total = len(curves)
 
+    _cb("曲线拟合", 0, max(n_curves_total, 1))
     # 端点对齐: 仅合并"同一节点的重复测量"(同一次分叉被两条曲线共享的端点)。
     # 阈值必须远小于相邻分支节点的间距(一个采样步长, 细根约 0.06), 否则会把
     # 不同的分支节点错误合并、拉偏两条曲线的端点。
@@ -350,7 +370,8 @@ def run_images_pipeline(imgdir, outdir, pose=None):
     n_out = 0
     controls_by_cid = {}       # cid -> 拟合控制点(供根表)
     curve_meta = {}            # cid -> (测点12槽坐标, 半径12槽) 供根表
-    for cid, items in curves.items():
+    for _ci, (cid, items) in enumerate(curves.items()):
+        _cb("曲线拟合", _ci + 1, max(n_curves_total, 1))
         P = np.array([it[1] for it in items])
         R = np.array([it[2] for it in items])
         # 各测点的生成参数 t = t_index/(每曲线点数-1): 与标记采样约定一致,
@@ -421,9 +442,11 @@ def run_images_pipeline(imgdir, outdir, pose=None):
         for r in ctrl_rows:
             w.writerow(r)
 
-    # 保存重建曲线 供对比图
+    # 保存重建曲线 供对比图 / 交互查看器
     np.save(os.path.join(outdir, "rebuilt_curves.npy"),
             np.array(rebuilt, dtype=object), allow_pickle=True)
+    from render import export_model_json
+    export_model_json(rebuilt, os.path.join(outdir, "model3d.json"))
 
     # 对比图: 左=上传的第 0 视角原图, 右=重建曲线在同一相机下的渲染
     # (不引入模型几何, 避免"原模型"旁路)
@@ -431,9 +454,10 @@ def run_images_pipeline(imgdir, outdir, pose=None):
     imgL = Image.open(os.path.join(imgdir, "cam0.png")).convert('RGB') \
         if os.path.isfile(os.path.join(imgdir, "cam0.png")) else \
         Image.fromarray(np.full((480, 480, 3), 255, dtype=np.uint8))
+    # auto_fit: 自动取景保证整根完整入画(旧实现固定缩放, 根超出画面被裁)
     imgR, _ = render_curves(rebuilt, c0, width=480, height=480,
                             bg=(255, 255, 255), color=(224, 67, 58),
-                            k_scale=0.6, subdiv=8)
+                            k_scale=0.6, subdiv=8, auto_fit=True)
     canvas = Image.new("RGB", (480*2 + 8, 480), (245, 246, 248))
     canvas.paste(imgL.resize((480, 480)), (0, 0))
     canvas.paste(Image.fromarray(imgR), (480 + 8, 0))
@@ -442,6 +466,10 @@ def run_images_pipeline(imgdir, outdir, pose=None):
 
     # [5] 根表(P2-9): 由重建结果推导 "主根 -> 分支点 -> 侧根" 树,
     #     输出与 table_build 相同 14 列结构的 root_table.csv/.sql
+    if not curve_meta:
+        raise ValueError(
+            "未能在上传图片中重建出任何曲线(检测到标记但三角化/拟合全部失败), "
+            "请检查图片是否为模块①生成的带标记视图、位姿文件是否与之配套。")
     from root_topology import write_root_table
     depths = meta.get('curve_depths')
     depths = {cid: int(depths[cid]) for cid in curve_meta} if depths else None
@@ -459,6 +487,7 @@ def run_images_pipeline(imgdir, outdir, pose=None):
         'points_table': pts_csv, 'control_table': ctrl_csv,
         'root_table': root_csv, 'root_sql': root_sql,
         'image': img_path, 'compare': compare_path,
+        'model3d': '/results/' + os.path.basename(outdir) + '/model3d.json',
     }
 
 
