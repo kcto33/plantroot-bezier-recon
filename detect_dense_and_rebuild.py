@@ -24,13 +24,14 @@ for _f in ('Microsoft YaHei', 'SimHei', 'SimSun', 'Noto Sans CJK SC'):
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 from camera import ring_of_cameras
-from triangulate import triangulate_dlt, reproject_error
+from triangulate import triangulate_robust, reproject_error
+from web_core_images import detect_palette_blobs
 
 IMG_W, IMG_H = 640, 640
 CAM_RADIUS, CAM_HEIGHT = 15.0, -2.0
 CAM_TARGET = [0.0, 0.0, -7.0]
 FX, FY, CX, CY = 600.0, 600.0, 320.0, 340.0
-N_VIEWS = 72
+N_VIEWS = 8            # 与 views_dense/ 实际视角数一致(此前误设 72)
 
 
 def build_cams():
@@ -39,28 +40,9 @@ def build_cams():
 
 
 def nearest_palette_centroid(image, palette, tol=70):
-    """按最近调色板颜色切分出每个颜色的 2D 质心投影。
-    返回 list: 每个颜色 -> (u,v) 或 None。用像素到调色板的最近距离 + 阈值过滤。"""
-    rgb = image.astype(np.int64)          # (H,W,3)
-    pal = np.asarray(palette, dtype=np.int64)   # (K,3)
-    # 每个像素的最近颜色距离
-    # 展平计算: H*W x K 距离
-    flat = rgb.reshape(-1, 3)                      # (P,3)
-    d = np.linalg.norm(flat[:, None, :] - pal[None, :, :], axis=2)  # (P,K)
-    nearest = d.argmin(axis=1)
-    nearest_d = d[np.arange(len(flat)), nearest]
-    H, W = image.shape[:2]
-    out = [None] * len(palette)
-    for k in range(len(palette)):
-        # 属于颜色k 且在阈值内的像素
-        m = (nearest == k) & (nearest_d <= tol)
-        if not m.any():
-            continue
-        ys, xs = np.divmod(np.nonzero(m)[0], W)
-        if len(xs) < 3:      # 太少, 视为噪声
-            continue
-        out[k] = (np.array([xs.mean(), ys.mean()]), float(np.sqrt(m.sum() / np.pi)))
-    return out
+    """按最近调色板颜色定位各颜色的 2D 质心(含连通域兜底)。
+    与主链路共用实现(web_core_images.detect_palette_blobs)。"""
+    return detect_palette_blobs(image, palette, tol=tol)
 
 
 def load_views(dirname="views_dense"):
@@ -101,10 +83,11 @@ def main():
             continue
         Pset = np.array([cams[vi].P for vi, _ in seen])
         uvset = np.array([d[0] for _, d in seen])
-        rec = triangulate_dlt(Pset, uvset)
+        rec, keep, resids = triangulate_robust(Pset, uvset)
+        if rec is None:
+            continue
         rec_points[ti] = rec
-        errs = [reproject_error(cams[vi].P, rec, d[0]) for vi, d in seen]
-        rec_err[ti] = float(np.mean(errs))
+        rec_err[ti] = float(np.mean(resids))
 
     n_ok = sum(1 for p in rec_points if p is not None)
     print(f"  成功三角化: {n_ok}/{n_targets}")

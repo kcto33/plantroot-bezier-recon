@@ -37,3 +37,41 @@ def reproject_error(projection, point3d, point2d):
     proj = projection @ Xh
     proj = proj[:2] / proj[2]
     return float(np.linalg.norm(proj - np.asarray(point2d, dtype=float)))
+
+
+def triangulate_robust(projections, points2d, tol_px=2.0, min_views=3,
+                       max_rounds=None):
+    """迭代剔除坏视角的多视角三角化(P1-5)。
+    每轮: DLT -> 各视角重投影误差 + cheirality(正深度)检查 -> 剔除误差最大
+    (或深度为负)的视角, 直到最大残差 <= tol_px 或只剩 min_views 个视角。
+    projections: (M,3,4); points2d: (M,2)。
+    返回 (X, keep_idx, resids); X 为 None 表示无法三角化。"""
+    P = np.atleast_3d(np.asarray(projections, dtype=float))
+    uv = np.atleast_2d(np.asarray(points2d, dtype=float))
+    M = P.shape[0]
+    keep = list(range(M))
+    if max_rounds is None:
+        max_rounds = max(0, M - min_views)
+    X = None
+    for _ in range(max_rounds + 1):
+        if len(keep) < 2:
+            return None, [], []
+        X = triangulate_dlt(P[keep], uv[keep])
+        Xh = np.append(X, 1.0)
+        depths = np.array([(P[i] @ Xh)[2] for i in keep])   # 相机系深度
+        errs = np.array([np.linalg.norm((P[i] @ Xh)[:2] / (P[i] @ Xh)[2] - uv[i])
+                         for i in keep])
+        bad = (errs > tol_px) | (depths <= 0)
+        if not bad.any() or len(keep) <= min_views:
+            break
+        score = errs.astype(float).copy()
+        score[depths <= 0] = np.inf      # 负深度(点在相机后方)优先剔除
+        del keep[int(np.argmax(score))]
+    if X is None:
+        return None, [], []
+    resids = []
+    for i in keep:
+        pr = P[i] @ np.append(X, 1.0)
+        pr = pr[:2] / pr[2]
+        resids.append(float(np.linalg.norm(pr - uv[i])))
+    return X, keep, resids

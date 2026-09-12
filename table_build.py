@@ -166,18 +166,20 @@ def rows_to_sql(rows, table_name='root_table', path=None):
     ]
     create = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  " + \
              ",\n  ".join(col_defs) + ",\n  PRIMARY KEY (序号)\n);"
+
+    def sqlval(v):
+        if v is None:
+            return 'NULL'
+        if isinstance(v, str):
+            return f"'{v}'"
+        return str(v)
+
     inserts = []
     for r in rows:
-        vals = [
-            r['序号'], r['级别'], r['编号1'], r['编号2'],
-            r['编号3'] if r['编号3'] is not None else 'NULL',
-            r['编号4'] if r['编号4'] is not None else 'NULL',
-            f"'{r['类别']}'",
-            r['x'], r['y'], r['z'], r['粗细'], r['成熟度'],
-            r['上节点'] if r['上节点'] is not None else 'NULL',
-            r['下节点'] if r['下节点'] is not None else 'NULL',
-        ]
-        inserts.append(f"INSERT INTO {table_name} VALUES ({', '.join(map(str, vals))});")
+        vals = [sqlval(r[k]) for k in
+                ('序号', '级别', '编号1', '编号2', '编号3', '编号4', '类别',
+                 'x', 'y', 'z', '粗细', '成熟度', '上节点', '下节点')]
+        inserts.append(f"INSERT INTO {table_name} VALUES ({', '.join(vals)});")
     text = create + "\n\n" + "\n".join(inserts)
     if path:
         with open(path, 'w', encoding='utf-8') as f:

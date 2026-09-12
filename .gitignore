@@ -12,6 +12,19 @@ results/
 # 旧的独立测试输出
 rebuilt_out/
 
+# 输入图片数据(体积大, 不纳入版本控制)
+data/
+
+# 评估/回归测试输出
+evaluation/
+
+# 本地工具状态
+.zcode/
+
+# 运行时生成的散件输出
+detections.json
+views_branch/meta.json
+
 # 平台/编辑器
 .DS_Store
 Thumbs.db

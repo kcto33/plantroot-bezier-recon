@@ -5,8 +5,9 @@ branch_table_to_bezier.py
 
 说明:
   - 图片三角化只能重建出离散的分支点(分叉点), 表里没有曲线上的连续采样点。
-  - 因此这里把这些重建点作为"骨架关键点", 按空间拓扑(左右侧 + 深度)组织,
-    对每一簇做最小二乘三次贝塞尔拟合, 绘制重建的根系贝塞尔曲线。
+  - 表中已含"原点/分支点"节点行与 上节点 链接(见 detect_and_triangulate),
+    这里按树结构(而非早期"x 正负分组 + z 排序"启发式)把分支点串成
+    骨架链, 对每一簇做最小二乘三次贝塞尔拟合, 绘制重建的根系骨架。
 """
 import csv
 import numpy as np
@@ -22,12 +23,48 @@ for _f in ('Microsoft YaHei', 'SimHei', 'SimSun', 'Noto Sans CJK SC'):
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
-def read_points(csv_path):
-    pts = []
+def read_table(csv_path):
+    """读分支点表 -> (rows, row_by_id)。"""
+    rows = []
     with open(csv_path, encoding='utf-8-sig') as f:
         for d in csv.DictReader(f):
-            pts.append(np.array([float(d['x']), float(d['y']), float(d['z'])]))
-    return np.array(pts)
+            rows.append(d)
+    return rows, {int(r['序号']): r for r in rows if r['序号'] != ''}
+
+
+def xyz(r):
+    return np.array([float(r['x']), float(r['y']), float(r['z'])])
+
+
+def tree_chains(rows, row_by_id):
+    """按 上节点 链接把分支点组织成骨架链: 从 原点 的每个一级分支起,
+    沿"以本行为父"的子分支递归。返回若干条点链(每条 >=2 点)。"""
+    kids = {}
+    for r in rows:
+        if r['类别'] == '分支点' and r['上节点'] not in ('', None, 'None'):
+            pid = int(float(r['上节点']))
+            kids.setdefault(pid, []).append(int(r['序号']))
+    chains = []
+    def walk(rid, chain):
+        kids_here = sorted(kids.get(rid, []))
+        if not kids_here:
+            chains.append(chain)
+            return
+        for k, cid in enumerate(kids_here):
+            ext = chain + [cid] if k == 0 else [row_by_id[chain[-1]] and cid]
+            # 分叉处: 主链延续, 其余子链以"父链 + 该子分支"成新链
+            if k == 0:
+                walk(cid, chain + [cid])
+            else:
+                walk(cid, [cid])
+    origin = [int(r['序号']) for r in rows if r['类别'] == '原点']
+    for o in origin:
+        for cid in sorted(kids.get(o, [])):
+            walk(cid, [cid])
+    if not chains:   # 兜底: 无链接信息时退化为按序单链
+        chains = [[int(r['序号']) for r in rows if r['类别'] == '分支点']]
+    return [[xyz(row_by_id[rid]) for rid in ch] for ch in chains
+            if len(ch) >= 1]
 
 
 def chord_param(P):
@@ -60,43 +97,31 @@ def sample(P0, P1, P2, P3, n=40):
     return ((1-t)**3*P0 + 3*(1-t)**2*t*P1 + 3*(1-t)*t**2*P2 + t**3*P3)
 
 
-def cluster_skeleton(pts):
-    """按 x 正负分左右, 每组内按 z(深度, 越深越靠后) 排序, 得到骨架簇。
-    返回 聚类后的点列表。"""
-    left = pts[pts[:, 0] < 0]
-    right = pts[pts[:, 0] >= 0]
-    left = left[np.argsort(left[:, 2])]   # z 从小到大(浅->深)
-    right = right[np.argsort(right[:, 2])]
-    out = []
-    if len(left):
-        out.append(left)
-    if len(right):
-        out.append(right)
-    return out
-
-
 def main():
-    pts = read_points("root_branch_table.csv")
-    print(f"读入 {len(pts)} 个重建分支点:")
-    for i, p in enumerate(pts):
-        print(f"  {i+1}: {np.round(p,3)}")
-    print("引用说明: 图片三角化仅得离散分支点, 此处按空间骨架做贝塞尔拟合。")
+    rows, row_by_id = read_table("root_branch_table.csv")
+    bps = [r for r in rows if r['类别'] == '分支点']
+    print(f"读入 {len(bps)} 个重建分支点:")
+    for i, r in enumerate(bps):
+        print(f"  {i+1}: {np.round(xyz(r),3)} (级别 {r['级别']})")
+    print("引用说明: 图片三角化仅得离散分支点, 此处按树结构骨架做贝塞尔拟合。")
 
-    clusters = cluster_skeleton(pts)
+    chains = tree_chains(rows, row_by_id)
     fig = plt.figure(figsize=(9, 8))
     ax = fig.add_subplot(111, projection='3d')
-    colors = ['#e0433a', '#1f8fe0']
-    for ci, cl in enumerate(clusters):
+    colors = ['#e0433a', '#1f8fe0', '#2ca02c', '#ff7f0e', '#9467bd',
+              '#d62728', '#17becf', '#bcbd22', '#7f7f7f', '#e377c2']
+    for ci, cl in enumerate(chains):
+        cl = np.array(cl)
         ctrl = fit_cubic(cl)
         s = sample(*ctrl)
-        ax.plot(s[:, 0], s[:, 1], s[:, 2], color=colors[ci % 2], lw=2.2,
+        ax.plot(s[:, 0], s[:, 1], s[:, 2], color=colors[ci % len(colors)], lw=2.2,
                 label=f"重建贝塞尔骨架{ci+1} ({len(cl)}点)")
         ax.scatter(cl[:, 0], cl[:, 1], cl[:, 2], color='black', s=40, zorder=5)
 
     # 地表原点参考
     ax.scatter(0, 0, 0, color='green', s=70, marker='*', label='地表原点')
     ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-    ax.set_title("由图片重建分支点 -> 贝塞尔拟合重建模型")
+    ax.set_title("由图片重建分支点 -> 按树结构骨架贝塞尔拟合")
     ax.view_init(elev=22, azim=-58)
     ax.legend()
     fig.tight_layout()

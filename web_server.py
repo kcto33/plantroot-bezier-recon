@@ -140,6 +140,8 @@ class Handler(BaseHTTPRequestHandler):
                 "stats": res['stats'],
                 "points_table": "/results/job_images/reconstructed_points.csv",
                 "control_table": "/results/job_images/control_points.csv",
+                "root_table": "/results/job_images/root_table.csv",
+                "root_sql": "/results/job_images/root_table.sql",
                 "image": "/results/job_images/rebuilt_from_table.png",
                 "compare": "/results/job_images/rebuilt_vs_orig_cam0.png",
             })
