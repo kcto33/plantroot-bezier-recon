@@ -31,9 +31,12 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 
 from root_model import RootModel, RootParams
 from camera import ring_of_cameras
-from render import render_curves, render_marker, save_image
-from triangulate import triangulate_dlt, reproject_error
+from render import render_curves, draw_markers, save_image
+from triangulate import triangulate_robust
 from bezier_fit import fit_cubic_bezier
+from web_core_images import (detect_palette_blobs as web_detect_palette_blobs,
+                             make_palette, estimate_radius_3d,
+                             ENDPOINT_MERGE_TOL, TRIANGULATION_TOL_PX)
 
 IMG_W, IMG_H = 640, 640
 CAM_RADIUS, CAM_HEIGHT = 15.0, -2.0
@@ -42,7 +45,7 @@ FX, FY, CX, CY = 600.0, 600.0, 320.0, 340.0
 N_VIEWS = 24
 K_SCALE = 0.6
 POINTS_PER_CURVE = 12      # 每段测 起点+中间+终点 共12个曲线上点, 稳住拟合
-MIN_MARKER_R = 5
+MIN_MARKER_R = 3
 OUTDIR_VIEWS = "views_pts4"
 POINTS_CSV = "reconstructed_points.csv"
 FIT_IMG = "rebuilt_from_table.png"
@@ -113,41 +116,10 @@ def occlusion_visible(p3, cam, zbuf, tol=0.15):
 
 
 def nearest_palette_centroid(image, palette, tol=70, subsample=1):
-    """按最近调色板色定位各颜色质心。subsample>1 时先块均值下采样提速, 质心乘回原尺度。
-    默认为 1(不降采样)以避免质心偏移。"""
-    rgb = image.astype(np.int64)
-    H, W = rgb.shape[:2]
-    # 下采样(块均值), 减少像素数
-    if subsample > 1:
-        H2, W2 = H // subsample, W // subsample
-        rgb2 = rgb[:H2*subsample, :W2*subsample].reshape(
-            H2, subsample, W2, subsample, 3).mean(axis=(1, 3)).astype(np.int64)
-    else:
-        H2, W2, rgb2 = H, W, rgb
-    pal = np.asarray(palette, dtype=np.int64)
-    flat = rgb2.reshape(-1, 3)
-    # 分块计算到调色板的距离, 避免一次性大矩阵
-    out = [None] * len(palette)
-    d_min = np.full(len(flat), np.inf)
-    n_idx = np.full(len(flat), -1, dtype=int)
-    CH = 256
-    for s in range(0, len(flat), CH):
-        blk = flat[s:s+CH]
-        dd = np.linalg.norm(blk[:, None, :] - pal[None, :, :], axis=2)  # (B,K)
-        mn = dd.argmin(axis=1)
-        mnd = dd[np.arange(len(blk)), mn]
-        seg = slice(s, s+CH)
-        d_min[seg] = mnd
-        n_idx[seg] = mn
-    for k in range(len(palette)):
-        m = (n_idx == k) & (d_min <= tol)
-        if not m.any():
-            continue
-        ys, xs = np.divmod(np.nonzero(m)[0], W2)
-        if len(xs) < 3:
-            continue
-        out[k] = np.array([xs.mean() * subsample, ys.mean() * subsample])
-    return out
+    """按最近调色板色定位各颜色质心(带连通域兜底与像素半径)。
+    实现与 web 入口③共用(web_core_images.detect_palette_blobs), 避免两份逻辑漂移。
+    subsample 参数仅为兼容旧签名, 现统一不降采样(P0-2: 下采样会稀释小标记)。"""
+    return web_detect_palette_blobs(image, palette, tol=tol)
 
 
 def main():
@@ -168,63 +140,64 @@ def main():
         img, zbuf = render_curves(model.curves, c, width=IMG_W, height=IMG_H,
                                   bg=(255, 255, 255), color=(90, 55, 25),
                                   k_scale=K_SCALE, subdiv=8)
-        for ti, tp in enumerate(targets):
-            if occlusion_visible(tp['coord'], c, zbuf):
-                Xc = (c.R @ tp['coord'].reshape(3, 1) + c.t).ravel()
-                Z = Xc[2]
-                r_pix = min(22.0, c.fx * tp['radius'] / max(Z, 1e-6) * K_SCALE)
-                render_marker(tp['coord'], c, img, zbuf,
-                              color=tp['color'], marker_r=int(max(MIN_MARKER_R, r_pix)))
+        # 标记: 深度排序 + 互斥(重叠标记整个跳过), 保证检测质心不被拉偏(P1-4)
+        draw_markers(targets, c, img, zbuf, k_scale=K_SCALE,
+                     min_marker_r=MIN_MARKER_R, order_shift=ci)
         save_image(img, os.path.join(OUTDIR_VIEWS, f"{c.name}.png"))
 
     # [2] 每个视角定位各点
     print("[2/5] 逐视角按最近颜色定位 2D 点 ...")
-    dets = [[None] * N_VIEWS for _ in range(len(targets))]
+    dets = [[None] * N_VIEWS for _ in range(len(targets))]   # [ti][vi] = uv
+    rpix = [[None] * N_VIEWS for _ in range(len(targets))]   # [ti][vi] = 像素半径
     for vi in range(N_VIEWS):
         img = np.asarray(Image.open(os.path.join(OUTDIR_VIEWS, f"cam{vi}.png")).convert('RGB'))
         cc = nearest_palette_centroid(img, palette)
         for k in range(len(targets)):
-            dets[k][vi] = cc[k]
+            if cc[k] is not None:
+                dets[k][vi], rpix[k][vi] = cc[k]
 
-    # [3] 三角化 (带视角一致性剔除)
-    print("[3/5] 多视角 DLT 三角化(剔除配错视角) ...")
+    # [3] 三角化 (迭代剔除坏视角 + cheirality 正深度校验, P1-5) + 半径反演(P2-8)
+    print("[3/5] 多视角 DLT 三角化(迭代剔除配错视角) ...")
     rec = [None] * len(targets)
-    n_view_rej = 0
+    rad3d = [None] * len(targets)
+    kept_views = [set() for _ in range(len(targets))]
+    kept_resids = [[] for _ in range(len(targets))]
     for ti in range(len(targets)):
         seen = [(vi, dets[ti][vi]) for vi in range(N_VIEWS) if dets[ti][vi] is not None]
-        if len(seen) < 3:
-            # 视角太少, 直接用全部
-            if len(seen) < 2:
-                continue
-            Pset = np.array([cams[vi].P for vi, _ in seen])
-            uvset = np.array([p for _, p in seen])
-            rec[ti] = triangulate_dlt(Pset, uvset)
+        if len(seen) < 2:
             continue
-        keep = list(range(len(seen)))
-        for _ in range(2):   # 迭代2轮剔除坏视角
-            Pset = np.array([cams[seen[i][0]].P for i in keep])
-            uvset = np.array([seen[i][1] for i in keep])
-            X = triangulate_dlt(Pset, uvset)
-            # 重投影误差
-            errs = []
-            for i in keep:
-                P = cams[seen[i][0]].P
-                Xh = np.append(X, 1.0)
-                pr = P @ Xh
-                pr = pr[:2] / pr[2]
-                errs.append(np.linalg.norm(pr - seen[i][1]))
-            errs = np.array(errs)
-            if errs.max() <= 2.0 or len(keep) < 3:
-                rec[ti] = X
-                break
-            # 剔除误差最大的视角
-            bad = int(np.argmax(errs))
-            del keep[bad]
-            n_view_rej += 1
-        else:
-            rec[ti] = X
+        Pset = np.array([cams[vi].P for vi, _ in seen])
+        uvset = np.array([p for _, p in seen])
+        # 三角化: 迭代剔除重投影残差大的视角(P1-5), 阈值 1.2px 与入口③一致
+        X, keep, _res = triangulate_robust(Pset, uvset, tol_px=TRIANGULATION_TOL_PX)
+        if X is None:
+            continue
+        rec[ti] = X
+        kept_views[ti] = set(seen[i][0] for i in keep)
+        kept_resids[ti] = list(_res)
+        rad3d[ti] = estimate_radius_3d(
+            [rpix[ti][seen[i][0]] for i in keep],
+            [cams[seen[i][0]] for i in keep], X)
     n_ok = sum(1 for p in rec if p is not None)
-    print(f"  成功三角化 {n_ok}/{len(targets)} (剔除 {n_view_rej} 个配错视角)")
+    print(f"  成功三角化 {n_ok}/{len(targets)}")
+
+    # 保存逐点检测/残差(供 evaluate_reconstruction.py 校验 C4/B2)
+    detections = {'points': {}}
+    for ti in range(len(targets)):
+        if rec[ti] is None:
+            continue
+        Xh = np.append(rec[ti], 1.0)
+        det_entry = {'dets': {}, 'reproj_errs': []}
+        for vi in range(N_VIEWS):
+            if dets[ti][vi] is not None:
+                pr = cams[vi].P @ Xh; pr = pr[:2] / pr[2]
+                det_entry['dets'][str(vi)] = [float(x) for x in dets[ti][vi]]
+                if vi in kept_views[ti]:
+                    det_entry['reproj_errs'].append(
+                        float(np.linalg.norm(pr - dets[ti][vi])))
+        detections['points'][str(ti)] = det_entry
+    with open("detections.json", "w", encoding="utf-8") as f:
+        json.dump(detections, f, ensure_ascii=False)
 
     # [4] 写空间坐标表
     print("[4/5] 写空间坐标表 ->", POINTS_CSV)
@@ -244,54 +217,21 @@ def main():
 
     curves = {}
     for ti, tp in enumerate(targets):
-        if rec[ti] is None:
+        if rec[ti] is None or rad3d[ti] is None:
             continue
         curves.setdefault(tp['curve_id'], []).append(
-            (tp['t_index'], rec[ti], tp['radius'],
-             np.array(tp['coord_true']) if 'coord_true' in tp else None))
+            (tp['t_index'], rec[ti], rad3d[ti]))
     for cid in curves:
         curves[cid].sort(key=lambda x: x[0])
 
-    from bezier_fit import fit_bezier_any, sample_bezier_any
+    from bezier_fit import fit_bezier_any, sample_bezier_any, remove_outliers
     DEGREE = 5   # 5次贝塞尔(6控制点): 比三次更贴复杂弯曲, 又不至于过拟合摆动
+
     fig = plt.figure(figsize=(9, 8))
     ax = fig.add_subplot(111, projection='3d')
     rebuilt_curves = []
     ctrl_rows = []       # 存 每段反解出的 6 控制点
     n_ctrl_ok = 0
-
-    def remove_outliers(P, sigma=3.0):
-        """用低阶贝塞尔为基准, 迭代剔除距基准过远的离群测点。返回 (P_clean, 掩码)。"""
-        P = np.asarray(P, dtype=float)
-        if len(P) <= 5:
-            return P, np.ones(len(P), dtype=bool)
-        from bezier_fit import fit_cubic_bezier
-        keep = np.ones(len(P), dtype=bool)
-        for _ in range(3):
-            Pk = P[keep]
-            if len(Pk) < 5:
-                break
-            # 低阶(3次)基准, 稳健不摆动
-            try:
-                P0, p1, p2, p3, err = fit_cubic_bezier(Pk)
-            except Exception:
-                break
-            t = np.linspace(0, 1, 60)[:, None]
-            base = ((1-t)**3*P0 + 3*(1-t)**2*t*p1 + 3*(1-t)*t**2*p2 + t**3*p3)
-            d = np.linalg.norm(Pk[:, None, :] - base[None, :, :], axis=2).min(axis=1)
-            med = np.median(d)
-            if med < 1e-4:
-                break
-            thresh = max(sigma * med, 0.3)     # 阈值: 中位残差*sigma, 至少0.3
-            good = d <= thresh
-            # 更新原始掩码
-            idxs = np.where(keep)[0]
-            new_keep = keep.copy()
-            new_keep[idxs[~good]] = False
-            if new_keep.sum() < 5:
-                break
-            keep = new_keep
-        return P[keep], keep
 
     def smooth_points(P, win=3):
         """曲线测点平滑(保留端点), 用滑动平均去个别误差点毛刺。"""
@@ -305,8 +245,9 @@ def main():
         return out
 
     # ---- 节点连续性: 端点对齐 ----
-    # 收集所有段的 首点(起点)/末点(终点), 空间上很近的(同一分叉节点的多次三角化)
-    # 合并取均值, 使相邻共享节点的各段端点用同一坐标。
+    # 收集所有段的 首点(起点)/末点(终点), 仅合并"同一节点的重复测量"
+    # (同一次分叉被两条曲线共享的端点)。阈值必须远小于相邻分支节点的间距
+    # (一个采样步长, 细根约 0.06), 否则会把不同的分支节点错误合并、拉偏端点。
     endpoint_groups = []   # 每个聚类: 共享坐标
     e_assign = {}          # (cid, 'start'/'end') -> 聚类索引
     for cid, items in curves.items():
@@ -317,7 +258,7 @@ def main():
             pt = P[k]
             placed = False
             for gi, g in enumerate(endpoint_groups):
-                if np.linalg.norm(g['coord'] - pt) < 0.35:
+                if np.linalg.norm(g['coord'] - pt) < ENDPOINT_MERGE_TOL:
                     g['pts'].append(pt)
                     g['coord'] = np.mean(g['pts'], axis=0)
                     e_assign[(cid, tag)] = gi
@@ -328,9 +269,14 @@ def main():
                 e_assign[(cid, tag)] = len(endpoint_groups) - 1
 
     n_out = 0
+    controls_by_cid = {}       # cid -> 拟合控制点(供根表)
+    curve_meta = {}            # cid -> 12 槽测点/半径(供根表)
     for cid, items in curves.items():
         P = np.array([it[1] for it in items])          # 坐标
         R = np.array([it[2] for it in items])          # 半径
+        # 各测点的生成参数 t = t_index/(每曲线点数-1): 与标记采样约定一致,
+        # 用它拟合可避免弦长参数化失配导致的控制点震荡(P2-10)。
+        t_orig = np.array([it[0] for it in items], dtype=float) / max(POINTS_PER_CURVE - 1, 1)
         # 端点用对齐后坐标
         if len(P) >= 2:
             P[0] = endpoint_groups[e_assign[(cid, 'start')]]['coord']
@@ -338,6 +284,7 @@ def main():
         if len(P) >= DEGREE + 1:
             P, keep = remove_outliers(P)               # 剔除离群测点
             n_out += int((~keep).sum())
+            t_k = t_orig[keep]
             P = smooth_points(P, win=3)                # 再轻度平滑
             # 同步半径掩码: 剔除/平滑后的半径
             Rk = R[keep]
@@ -349,25 +296,44 @@ def main():
                     Rs[i] = Rk[lo:hi].mean()
             else:
                 Rs = Rk
-            ctrl, err = fit_bezier_any(P, degree=DEGREE)
+            deg = min(DEGREE, len(P) - 1)
+            ctrl, err = fit_bezier_any(P, degree=deg, t=t_k)
             s = sample_bezier_any(ctrl, n=100)
             n_ctrl_ok += 1
-            # 沿贝塞尔插值半径(用测点的弧长参数化 -> 贝塞尔参数 t 对应半径)
+            controls_by_cid[cid] = ctrl
+            # 沿贝塞尔插值半径(用测点的生成参数 t 对应半径)
             from bezier_fit import chord_length_param
-            t_meas = chord_length_param(P)
-            radii_curve = np.interp(np.linspace(0, 1, len(s)), t_meas, Rs)
-            # 粗细向末端渐细(原模型 taper), 并按测点半径整体缩放
-            radii_curve = radii_curve * (1.0 - 0.6 * np.linspace(0, 1, len(s)))
+            radii_curve = np.interp(np.linspace(0, 1, len(s)), t_k, Rs)
             for i, p in enumerate(ctrl):
-                c = 'red' if i in (0, DEGREE) else 'blue'
+                c = 'red' if i in (0, deg) else 'blue'
                 ax.scatter(*p, color=c, s=12)
-                ctrl_rows.append([cid, i, '端点' if i in (0, DEGREE) else '控制点',
+                ctrl_rows.append([cid, i, '端点' if i in (0, deg) else '控制点',
                                   round(float(p[0]), 4), round(float(p[1]), 4),
                                   round(float(p[2]), 4)])
         else:
             s = P
             radii_curve = np.full(len(s), 0.08)
         rebuilt_curves.append({'points': s, 'radii': radii_curve})
+        # 根表用 12 槽测点/半径(缺失槽位用拟合曲线补齐), 端点用拟合端点
+        pts_full = np.full((POINTS_PER_CURVE, 3), np.nan)
+        rad_full = np.full(POINTS_PER_CURVE, np.nan)
+        for (k, xyz, r) in items:
+            pts_full[k] = xyz
+            rad_full[k] = r
+        for k in range(POINTS_PER_CURVE):
+            if np.isnan(pts_full[k]).any():
+                from bezier_fit import bernstein_basis
+                if cid in controls_by_cid:
+                    tt = k / max(POINTS_PER_CURVE - 1, 1)
+                    dg = len(controls_by_cid[cid]) - 1
+                    pts_full[k] = bernstein_basis(dg, np.array([tt]))[0] @ controls_by_cid[cid]
+                else:
+                    pts_full[k] = np.nan_to_num(pts_full[k])
+                rad_full[k] = np.nanmax(rad_full) if np.isfinite(rad_full).any() else 0.08
+        if cid in controls_by_cid:
+            pts_full[0] = controls_by_cid[cid][0]
+            pts_full[-1] = controls_by_cid[cid][-1]
+        curve_meta[cid] = {'points': pts_full, 'radii': rad_full}
         # 用粗细反映到线宽(模拟渐变)
         for j in range(0, len(s), 1):
             lw = 0.8 + 6.0 * (radii_curve[j] / max(radii_curve.max(), 1e-6))
@@ -398,6 +364,14 @@ def main():
         {'points': c['points'], 'radii': c['radii']} for c in rebuilt_curves
     ], dtype=object), allow_pickle=True)
     print("  已保存 rebuilt_curves.npy 供同视角对比渲染")
+
+    # [6] 根表(P2-9): 由重建结果推导 "主根 -> 分支点 -> 侧根" 树,
+    #     输出与 table_build 相同 14 列结构的 root_table.csv/.sql
+    from root_topology import write_root_table
+    depths = {cid: int(model.curves[cid]['depth']) for cid in curve_meta}
+    write_root_table(curve_meta, depths, max_depth=model.params.maxDepth,
+                     csv_path="root_table.csv", sql_path="root_table.sql")
+    print(f"  已写 root_table.csv / root_table.sql ({len(curve_meta)} 条曲线)")
     print("-" * 60)
 
 

@@ -131,8 +131,12 @@ def render_curves(curves, cam, width=640, height=640,
     return image.astype(np.uint8), zbuf
 
 
-def render_marker(point3d, cam, image, zbuf, color=(0, 200, 0), marker_r=12):
-    """在已渲染图像上以醒目颜色画一个目标点标记(投影该三维点)。"""
+def render_marker(point3d, cam, image, zbuf, color=(0, 200, 0), marker_r=12,
+                  occupied=None):
+    """在已渲染图像上以醒目颜色画一个目标点标记(投影该三维点), 写完整圆盘并写 zbuf。
+    occupied: 已画标记的占用掩码(可选)。若本标记圆盘与已画标记重叠则整个跳过
+    (互斥): 被部分覆盖的标记会剩新月形残片, 检测质心会被拉偏; 互斥保证
+    每个画出的标记都是完整圆盘, 检测质心无偏(P1-4)。"""
     u, v = cam.project(point3d)
     Xc = (cam.R @ np.asarray(point3d).reshape(3, 1) + cam.t).ravel()
     z = Xc[2]
@@ -143,8 +147,13 @@ def render_marker(point3d, cam, image, zbuf, color=(0, 200, 0), marker_r=12):
         x0, x1 = max(0, u0 - marker_r), min(width, u0 + marker_r + 1)
         ys, xs = np.mgrid[y0:y1, x0:x1]
         mask = (xs - u) ** 2 + (ys - v) ** 2 <= marker_r ** 2
-        # 只在与目标点深度接近处着色(受 z-buffer 约束, 避免穿透写)
         if mask.any():
+            if occupied is not None:
+                if (occupied[y0:y1, x0:x1] & mask).any():
+                    return u, v, z      # 与其他标记重叠: 整个不画(不留残片)
+                occupied[y0:y1, x0:x1] |= mask
+            zbuf[y0:y1, x0:x1] = np.where(
+                mask, np.minimum(z, zbuf[y0:y1, x0:x1]), zbuf[y0:y1, x0:x1])
             for c in range(3):
                 sub = image[y0:y1, x0:x1, c]
                 sub[mask] = color[c]
@@ -153,6 +162,57 @@ def render_marker(point3d, cam, image, zbuf, color=(0, 200, 0), marker_r=12):
 
 def save_image(image, path):
     Image.fromarray(image.astype(np.uint8)).save(path)
+
+
+def occlusion_visible(point3d, cam, zbuf, tol=0.15):
+    """判断 point3d 在该相机下是否未被遮挡(深度不大于该处 zbuf)。"""
+    u, v = cam.project(point3d)
+    Xc = (cam.R @ np.asarray(point3d).reshape(3, 1) + cam.t).ravel()
+    z = Xc[2]
+    if z <= 0:
+        return False
+    ui, vi = int(round(u)), int(round(v))
+    if ui < 0 or ui >= zbuf.shape[1] or vi < 0 or vi >= zbuf.shape[0]:
+        return False
+    return z <= zbuf[vi, ui] + tol
+
+
+def draw_markers(targets, cam, image, zbuf, k_scale=0.6,
+                 min_marker_r=5, max_marker_r=22.0, order_shift=0):
+    """绘制带互斥的标记列表(P1-4)。
+    targets: 每项含 'coord'(3,), 'color'((r,g,b)), 'radius'(三维半径)。
+
+    绘制顺序 = 基础随机排列按视角滚动(order_shift 为视角索引):
+    分叉节点处常有多个标记互相重叠(同一节点既是父曲线测点又是子曲线起点,
+    且各点深度次序在环视相机下基本固定), 若按固定顺序绘制, 其中某个标记
+    会在所有视角都被覆盖成新月残片甚至完全消失。互斥(与已画标记重叠者
+    本视角整体跳过、不留残片)保证每个画出的标记都是完整圆盘、检测质心无偏;
+    而按视角滚动绘制顺序使重叠簇内各成员确定性地轮流做"第一画者",
+    各获得约 1/簇大小 的视角, 不再有永久输家。
+    每个标记仍先过中心可见性测试(被表面遮挡的点本视角不画)。
+    """
+    zs = []
+    for tp in targets:
+        Xc = (cam.R @ np.asarray(tp['coord']).reshape(3, 1) + cam.t).ravel()
+        zs.append(Xc[2])
+    zs = np.asarray(zs)
+    # 多套基础排列轮换: 若两个簇成员在某套排列中恰好相邻(其"优先窗口"过小),
+    # 在其他排列中大概率不相邻, 从而避免饿死。
+    perms = [np.random.default_rng(s).permutation(len(zs))
+             for s in (12345, 24680, 13579)]
+    occupied = np.zeros(image.shape[:2], dtype=bool)
+    # 滚动步长取与 n 互素的数(37 与常见 n=120/8 互素), 使各视角的起点
+    # 均匀铺满整个循环 => 重叠簇内各成员确定性地轮流做"第一画者"。
+    perm = perms[order_shift % len(perms)]
+    shift = (order_shift * 37) % max(len(zs), 1)
+    for ti in np.roll(perm, shift):
+        tp = targets[ti]
+        if zs[ti] <= 0 or not occlusion_visible(tp['coord'], cam, zbuf):
+            continue
+        r_pix = min(max_marker_r, cam.fx * tp['radius'] / max(zs[ti], 1e-6) * k_scale)
+        render_marker(tp['coord'], cam, image, zbuf, color=tp['color'],
+                      marker_r=int(round(max(min_marker_r, r_pix))),
+                      occupied=occupied)
 
 
 def detect_colored_blob(image, color, tol=40):

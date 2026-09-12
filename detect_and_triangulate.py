@@ -65,17 +65,27 @@ def main():
     cams = build_cams()
     imgs = load_views()
 
+    # 元数据(由 generate_marked_views 写出): 颜色表/分支点层级/视角数
+    import json
+    meta_path = os.path.join("views_branch", "meta.json")
+    meta = {}
+    if os.path.isfile(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    palette = [tuple(c) for c in meta.get("palette", PALETTE)]
+    depths_meta = meta.get("depths")
+
     print("=" * 62)
     print("  仅凭图片像素 + 已知相机 -> 自动检测分支点并三角化")
     print("=" * 62)
 
     print("\n[1/4] 逐视角检测彩色分支点标记的 2D 位置 ...")
     # detections[bi][vi] = (u,v) 或 None
-    num_colors = len(PALETTE)
-    detections = [[None] * N_VIEWS for _ in range(num_colors)]
+    num_colors = len(palette)
+    detections = [[None] * len(imgs) for _ in range(num_colors)]
     for vi, img in enumerate(imgs):
         for bi in range(num_colors):
-            detections[bi][vi] = detect_blob(img, PALETTE[bi])
+            detections[bi][vi] = detect_blob(img, palette[bi])
         found = sum(1 for bi in range(num_colors) if detections[bi][vi] is not None)
         print(f"  视角 cam{vi}: 检测到 {found}/{num_colors} 个彩色分支点")
 
@@ -90,7 +100,7 @@ def main():
     max_depth_assumed = 3
     for bi in range(num_colors):
         # detections[bi][vi] = (uv, r_pix) 或 None
-        seen = [(vi, detections[bi][vi]) for vi in range(N_VIEWS)
+        seen = [(vi, detections[bi][vi]) for vi in range(len(imgs))
                 if detections[bi][vi] is not None]
         if len(seen) < 2:
             print(f"  分支点{bi+1} (色{PALETTE[bi]}): 可见视角 {len(seen)} < 2, 跳过后无法三角化。")
@@ -118,24 +128,51 @@ def main():
               f"X={np.round(rec,3)}  重投影误差均值={np.mean(rerr):.2f}px  "
               f"粗细={thick:.4f}")
 
-        # 填根表: 该分支点作为"首节点"行, 记录其3D坐标、粗细、成熟度
+        # 填根表: 该分支点作为"分支点"行, 记录其3D坐标、粗细、成熟度。
+        # 层级来自生成端元数据(P2-9: 不再硬编码 1)。
+        level = int(depths_meta[bi]) if depths_meta and bi < len(depths_meta) else 1
         rows.append({
-            '序号': len(rows),
-            '级别': 1,               # 分支点层级(简化, 可后续按需定)
+            '序号': len(rows) + 1,   # 行 0 预留给 原点
+            '级别': level,
             '编号1': bi,             # 分支点 id
             '编号2': 0,
             '编号3': None,
             '编号4': None,
-            '类别': '首节点',
+            '类别': '分支点',
             'x': round(float(rec[0]), 4),
             'y': round(float(rec[1]), 4),
             'z': round(float(rec[2]), 4),
             '粗细': round(thick, 4),  # 由圆盘尺寸+深度反推
-            '成熟度': maturity_of(1, max_depth_assumed),
+            '成熟度': maturity_of(level, max_depth_assumed),
             '上节点': None,
             '下节点': None,
         })
 
+    # 插入 原点 行, 并按几何就近为分支点填 上节点(层级-1 的最近节点)
+    # 与 下节点(指向以其为父的第一个分支点), 构成有效树(P2-9)。
+    rows.insert(0, {
+        '序号': 0, '级别': 1, '编号1': None, '编号2': None,
+        '编号3': None, '编号4': None, '类别': '原点',
+        'x': 0.0, 'y': 0.0, 'z': 0.0, '粗细': -1.0,
+        '成熟度': 1.0, '上节点': None, '下节点': None,
+    })
+    for i, r in enumerate(rows):
+        if r['类别'] != '分支点':
+            continue
+        p = np.array([r["x"], r["y"], r["z"]])
+        cand = [j for j, q in enumerate(rows)
+                if q['类别'] in ('原点', '分支点') and j != i
+                and q['级别'] == r['级别'] - 1]
+        if cand:
+            j = min(cand, key=lambda j: float(np.linalg.norm(
+                p - np.array([rows[j]["x"], rows[j]["y"], rows[j]["z"]]))))
+            r['上节点'] = rows[j]['序号']
+    for r in rows:
+        if r['类别'] not in ('原点', '分支点'):
+            continue
+        kids = [q for q in rows if q['上节点'] == r['序号']]
+        if kids:
+            r['下节点'] = kids[0]['序号']
     print("\n[3/4] 写入根表结构 ...")
     from table_build import rows_to_csv, rows_to_sql
     rows_to_csv(rows, "root_branch_table.csv")

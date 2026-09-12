@@ -11,7 +11,7 @@ import os
 import numpy as np
 from root_model import RootModel, RootParams
 from camera import ring_of_cameras
-from render import render_points, render_marker, save_image
+from render import render_points, draw_markers, save_image, occlusion_visible
 
 # 与 pipeline.py 一致的相机参数
 IMG_W, IMG_H = 640, 640
@@ -34,6 +34,16 @@ PALETTE = [
 ]
 
 
+def branch_palette(n):
+    """分支点颜色表(P2-11): 分支点数 > 8 时用贪心最远点选色扩展,
+    不再 PALETTE[i % 8] 取模复用 -- 取模会让不同分支点共享同一颜色,
+    跨视角按色配对时会把不同 3D 点合并。"""
+    if n <= len(PALETTE):
+        return list(PALETTE)
+    from web_core_images import make_palette
+    return make_palette(n)
+
+
 def build(model_seed=0):
     model = RootModel(RootParams(), seed=model_seed)
     cams = ring_of_cameras(N_VIEWS, CAM_RADIUS, CAM_HEIGHT, CAM_TARGET,
@@ -42,24 +52,12 @@ def build(model_seed=0):
     return model, cams, pts, radii
 
 
-def occlusion_visible(point3d, cam, zbuf, tol=0.15):
-    """判断 point3d 在该相机下是否未被遮挡(深度小于等于该处 zbuf)。"""
-    u, v = cam.project(point3d)
-    Xc = (cam.R @ np.asarray(point3d).reshape(3, 1) + cam.t).ravel()
-    z = Xc[2]
-    if z <= 0:
-        return False
-    ui, vi = int(round(u)), int(round(v))
-    if ui < 0 or ui >= zbuf.shape[1] or vi < 0 or vi >= zbuf.shape[0]:
-        return False
-    return z <= zbuf[vi, ui] + tol
-
-
 def main():
     model, cams, pts, radii = build()
     os.makedirs("views_branch", exist_ok=True)
     bps = model.bifurcations
-    print(f"分支点数量: {len(bps)} (颜色数 {len(PALETTE)})")
+    palette = branch_palette(len(bps))
+    print(f"分支点数量: {len(bps)} (颜色数 {len(palette)})")
 
     # 可见性矩阵: 每个分支点是否在某视角可见(未被遮挡)
     vis_matrix = np.zeros((len(bps), len(cams)), dtype=int)
@@ -68,25 +66,28 @@ def main():
                                   width=IMG_W, height=IMG_H,
                                   bg=(255, 255, 255), color=(90, 55, 25),
                                   k_scale=K_SCALE)
+        marks = [{'coord': bp['coord'], 'radius': bp['radius'],
+                  'color': palette[bi]}
+                 for bi, bp in enumerate(bps)]
         for bi, bp in enumerate(bps):
-            pt = bp['coord']
-            if occlusion_visible(pt, c, zbuf):
+            if occlusion_visible(bp['coord'], c, zbuf):
                 vis_matrix[bi, ci] = 1
-                # 标记半径 = 该点真实投影半径(r_pix = f*r3d/Z*k) 并设下限保证可见,
-                # 这样阶段2能通过彩色圆盘尺寸反推粗细。
-                r3d = bp['radius']
-                Xc = (c.R @ pt.reshape(3, 1) + c.t).ravel()
-                Z = Xc[2]
-                r_pix = min(40.0, c.fx * r3d / max(Z, 1e-6) * K_SCALE)
-                marker_r = int(max(3.0, r_pix))
-                render_marker(pt, c, img, zbuf,
-                              color=PALETTE[bi % len(PALETTE)], marker_r=marker_r)
+        # 标记: 深度排序 + 互斥(重叠标记整个跳过), 保证检测质心不被拉偏(P1-4)
+        draw_markers(marks, c, img, zbuf, k_scale=K_SCALE,
+                     min_marker_r=3.0, max_marker_r=40.0, order_shift=ci)
         save_image(img, os.path.join("views_branch", f"{c.name}.png"))
         print(f"  {c.name} 已生成")
 
+    # 元数据: 检测端(detect_and_triangulate)据此对齐颜色表与层级
+    import json
+    with open(os.path.join("views_branch", "meta.json"), "w", encoding="utf-8") as f:
+        json.dump({'n_branch': len(bps), 'palette': [list(c) for c in palette],
+                   'depths': [int(bp['depth']) + 1 for bp in bps],  # 分支点层级 = 子曲线层级
+                   'n_views': N_VIEWS}, f, ensure_ascii=False, indent=2)
+
     print("\n各分支点在不同视角的可见性:")
     for bi, bp in enumerate(bps):
-        print(f"  分支点{bi+1} (色{PALETTE[bi]}): "
+        print(f"  分支点{bi+1} (色{palette[bi]}): "
               f"可见视角={np.where(vis_matrix[bi]==1)[0].tolist()}")
 
 

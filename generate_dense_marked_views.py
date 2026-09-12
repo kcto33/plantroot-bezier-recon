@@ -15,30 +15,24 @@ import json
 import numpy as np
 from root_model import RootModel, RootParams
 from camera import ring_of_cameras
-from render import render_points, render_marker, save_image
+from render import render_points, draw_markers, save_image
+from web_core_images import make_palette
 
 IMG_W, IMG_H = 640, 640
 CAM_RADIUS, CAM_HEIGHT = 15.0, -2.0
 CAM_TARGET = [0.0, 0.0, -7.0]
 FX, FY, CX, CY = 600.0, 600.0, 320.0, 340.0
-N_VIEWS = 72
+N_VIEWS = 8            # 与实际渲染的视角数一致(此前误设 72, 与 views_dense/ 不符)
 K_SCALE = 0.6
 
-POINTS_PER_CURVE = 4   # 每条曲线取 起点+终点+2中间采样点(共4点), 供最小二乘贝塞尔拟合
-MIN_MARKER_R = 4       # 标记最小半径(像素), 保证小点可见
+POINTS_PER_CURVE = 12  # 每条曲线取 12 个曲线上点(与 dense_meta.json/主链路一致)
+MIN_MARKER_R = 3       # 标记最小半径(像素), 保证小点可见
 
 
 def hsv_palette(n):
-    """生成 n 个尽量区分的颜色(HSV 色相均分, 中高饱和/亮度)。返回 [(r,g,b),...]。"""
-    import colorsys
-    cols = []
-    for i in range(n):
-        h = i / max(n, 1)
-        s = 0.95
-        v = 0.95 if (i % 2 == 0) else 0.8
-        r, g, b = colorsys.hsv_to_rgb(h, s, v)
-        cols.append((int(round(r * 255)), int(round(g * 255)), int(round(b * 255))))
-    return cols
+    """调色板: 与主链路一致, 使用贪心最远点选色(相邻色距离大, 检测不易误配)。
+    此前的 HSV 色相均分法相邻色仅差 3° 色相, 检测时极易误配到邻近色。"""
+    return make_palette(n)
 
 
 def collect_points(model, per_curve=POINTS_PER_CURVE):
@@ -98,15 +92,14 @@ def main():
         for ti, tp in enumerate(targets):
             if occlusion_visible(tp['coord'], c, zbuf):
                 vis[ti, ci] = 1
-                Xc = (c.R @ tp['coord'].reshape(3, 1) + c.t).ravel()
-                Z = Xc[2]
-                r_pix = min(24.0, c.fx * tp['radius'] / max(Z, 1e-6) * K_SCALE)
-                render_marker(tp['coord'], c, img, zbuf,
-                              color=tp['color'], marker_r=int(max(MIN_MARKER_R, r_pix)))
+        # 标记: 深度排序 + 互斥(重叠标记整个跳过), 保证检测质心不被拉偏(P1-4)
+        draw_markers(targets, c, img, zbuf, k_scale=K_SCALE,
+                     min_marker_r=MIN_MARKER_R, max_marker_r=24.0, order_shift=ci)
         save_image(img, os.path.join("views_dense", f"{c.name}.png"))
         print(f"  {c.name} 已生成")
 
-    # 可见性统计
+    # 可见性统计: 以"该视角实际画出了标记"为准(互斥跳过/遮挡均视为不可见)
+    # 简化处理: 检测端自会丢弃缺失视角, 这里按遮挡测试统计供参考
     n_ok = sum(1 for ti in range(len(targets)) if vis[ti].sum() >= 2)
     print(f"\n能在>=2个视角看到的重建点: {n_ok}/{len(targets)}")
 
