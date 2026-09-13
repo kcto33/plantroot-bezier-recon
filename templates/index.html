@@ -92,6 +92,13 @@
               border-radius:8px; background:#fafbfd; touch-action:none;
               cursor:grab; display:block; }
   .viewer3d:active { cursor:grabbing; }
+  .viewer-wrap { position:relative; }
+  .coord-tip { position:absolute; left:0; top:0; display:none; z-index:5;
+               pointer-events:none; white-space:nowrap;
+               background:rgba(26,32,44,.92); color:#fff;
+               font-size:12px; line-height:1.5; padding:5px 9px;
+               border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,.25); }
+  .coord-tip b { color:#63b3ed; font-weight:700; }
   .viewer-hint { font-size:12px; color:var(--muted); margin-top:6px; }
   #lightbox .hint { position:fixed; top:12px; right:16px; color:#fff;
                     font-size:13px; text-shadow:0 1px 3px #000; }
@@ -198,6 +205,23 @@
 <script>
 let mFile = null, imgFiles = [], poseFile = null, genFile = null;
 let imgThumbUrls = [];
+
+/* 直达验收: ?job=<job_images_xxx> 打开即展示该次重建结果(免手动跑流程) */
+(async function(){
+  const j = new URLSearchParams(location.search).get('job');
+  if (!j) return;
+  try{
+    const m = await (await fetch(`/results/${j}/model3d.json`)).json();
+    await showResult('resultI','resBodyI',
+      { stats:{ '曲线数': m.curves.length }, model3d: `/results/${j}/model3d.json` },
+      'images', [], []);
+    document.getElementById('viewer_images').scrollIntoView({block:'center'});
+  }catch(e){
+    const s = document.getElementById('statImg');
+    s.className = 'status error';
+    s.textContent = '加载历史结果失败: ' + e.message;
+  }
+})();
 
 /* ---------- 状态辅助 ---------- */
 function setBusy(statId, btnId, busy, text){
@@ -476,8 +500,11 @@ async function showResult(secId, bodyId, data, kind, cards, csvs){
   if (data.model3d){
     html += `<div class="res-card" style="margin-top:16px">
       <div class="cap">3D 模型 · 可交互</div>
-      <canvas id="viewer_${kind}" class="viewer3d"></canvas>
-      <div class="viewer-hint">按住拖动旋转视角 · 滚轮缩放</div>
+      <div class="viewer-wrap">
+        <canvas id="viewer_${kind}" class="viewer3d"></canvas>
+        <div class="coord-tip" id="tip_${kind}"></div>
+      </div>
+      <div class="viewer-hint">按住拖动旋转视角 · 滚轮缩放 · 悬停高亮单条曲线并显示其三维坐标</div>
     </div>`;
   }
   body.innerHTML = html;
@@ -488,10 +515,12 @@ async function showResult(secId, bodyId, data, kind, cards, csvs){
   }
   document.getElementById(secId).scrollIntoView({behavior:'smooth', block:'start'});
 }
-/* ---------- 3D 交互查看器(原生 Canvas, 拖动旋转/滚轮缩放) ---------- */
+/* ---------- 3D 交互查看器(原生 Canvas, 拖动旋转/滚轮缩放/悬停读坐标) ---------- */
 function initModelViewer(jsonUrl, canvasId){
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
+  const wrap = canvas.parentElement;
+  const tip = document.getElementById('tip_' + canvasId.replace('viewer_',''));
   fetch(jsonUrl).then(r => r.json()).then(model => {
     const curves = model.curves || [];
     if (!curves.length) return;
@@ -511,6 +540,18 @@ function initModelViewer(jsonUrl, canvasId){
     }));
     let yaw = -1.36, pitch = 0.9, zoom = 1;
     let dragging = false, lx = 0, ly = 0, raf = null;
+    let hover = null;   // {sx, sy, coord:[x,y,z], idx:曲线索引}
+
+    // 归一化坐标 -> 屏幕坐标(设备像素), d 为深度(排序用)
+    function proj(p, W, H, sc, cy, sy, cp, sp){
+      const x1 = p[0]*cy - p[1]*sy, y1 = p[0]*sy + p[1]*cy;
+      const y2 = y1*cp - p[2]*sp, z2 = y1*sp + p[2]*cp;
+      return { sx: W/2 + x1*sc, sy: H/2 + y2*sc, d: z2 };
+    }
+    function fmt(v){
+      const a = Math.abs(v);
+      return (a >= 100 ? v.toFixed(0) : a >= 1 ? v.toFixed(1) : v.toFixed(3));
+    }
 
     function draw(){
       raf = null;
@@ -524,48 +565,108 @@ function initModelViewer(jsonUrl, canvasId){
       const cy = Math.cos(yaw), sy = Math.sin(yaw);
       const cp = Math.cos(pitch), sp = Math.sin(pitch);
       const segs = [];
-      for (const c of norm){
-        const P = c.pts.map(p => {
-          const x1 = p[0]*cy - p[1]*sy, y1 = p[0]*sy + p[1]*cy;
-          const y2 = y1*cp - p[2]*sp, z2 = y1*sp + p[2]*cp;
-          return { sx: W/2 + x1*sc, sy: H/2 + y2*sc, d: z2 };
-        });
+      norm.forEach((c, ci) => {
+        const P = c.pts.map(p => proj(p, W, H, sc, cy, sy, cp, sp));
         for (let i = 0; i < P.length - 1; i++){
           segs.push({ a: P[i], b: P[i+1], r: (c.r[i]+c.r[i+1])/2,
-                      d: (P[i].d + P[i+1].d)/2 });
+                      d: (P[i].d + P[i+1].d)/2, ci });
         }
-      }
+      });
       segs.sort((u, v) => u.d - v.d);   // 远的先画
       g.lineCap = 'round'; g.lineJoin = 'round';
-      for (const s of segs){
+      // 悬停换色: 选中的整条曲线画成黄色(最后画, 保证盖在交叠段之上)
+      function paint(s, yellow){
         const sh = Math.max(0.5, Math.min(1, 0.8 - s.d*0.3));
-        g.strokeStyle = `rgb(${Math.round(224*sh)},${Math.round(67*sh)},${Math.round(58*sh)})`;
+        g.strokeStyle = yellow ? `rgb(246,173,53)`
+                               : `rgb(${Math.round(224*sh)},${Math.round(67*sh)},${Math.round(58*sh)})`;
         g.lineWidth = Math.max(1, s.r*2*sc);
         g.beginPath(); g.moveTo(s.a.sx, s.a.sy); g.lineTo(s.b.sx, s.b.sy); g.stroke();
+      }
+      for (const s of segs) paint(s, false);
+      if (hover){
+        for (const s of segs) if (s.ci === hover.ci) paint(s, true);
       }
       // 原点标记(绿色)
       const ox = 0*cy - 0*sy, oy1 = 0*sy + 0*cy;
       const oy2 = oy1*cp - 0*sp, oz2 = oy1*sp + 0*cp;
       g.fillStyle = '#2f855a';
       g.beginPath(); g.arc(W/2 + ox*sc, H/2 + oy2*sc, 4*dpr, 0, Math.PI*2); g.fill();
+      // 悬停吸附点高亮
+      if (hover){
+        g.strokeStyle = '#f6ad35';
+        g.lineWidth = 2.5*dpr;
+        g.beginPath(); g.arc(hover.sx, hover.sy, 7*dpr, 0, Math.PI*2); g.stroke();
+        g.fillStyle = '#f6ad35';
+        g.beginPath(); g.arc(hover.sx, hover.sy, 3*dpr, 0, Math.PI*2); g.fill();
+      }
     }
     function requestDraw(){ if (!raf) raf = requestAnimationFrame(draw); }
 
+    /* 悬停: 找最近的曲线段(投影到屏幕), 线性插值出该点原始三维坐标 */
+    function updateHover(e){
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.clientWidth * dpr, H = canvas.clientHeight * dpr;
+      const rect = canvas.getBoundingClientRect();
+      const mxp = (e.clientX - rect.left) * dpr, myp = (e.clientY - rect.top) * dpr;
+      const sc = 0.8 * Math.min(W, H) * zoom;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const thresh = 12 * dpr;
+      let best = null;
+      norm.forEach((c, ci) => {
+        const P = c.pts.map(p => proj(p, W, H, sc, cy, sy, cp, sp));
+        for (let i = 0; i < P.length - 1; i++){
+          const ax = P[i].sx, ay = P[i].sy, bx = P[i+1].sx, by = P[i+1].sy;
+          const dx = bx-ax, dy = by-ay, len2 = dx*dx + dy*dy;
+          let t = len2 > 0 ? ((mxp-ax)*dx + (myp-ay)*dy) / len2 : 0;
+          t = Math.max(0, Math.min(1, t));
+          const px = ax + t*dx, py = ay + t*dy;
+          const dist = Math.hypot(mxp-px, myp-py);
+          if (dist < thresh && (!best || dist < best.dist)){
+            const q = c.pts[i], q2 = c.pts[i+1];
+            best = { dist, ci,
+              sx: px, sy: py,
+              coord: [0,1,2].map(k => (q[k] + (q2[k]-q[k])*t) * span + ctr[k]) };
+          }
+        }
+      });
+      hover = best;
+      if (best && tip){
+        tip.innerHTML = `<b>曲线 ${best.ci + 1}</b>　<b>X</b> ${fmt(best.coord[0])}　<b>Y</b> ${fmt(best.coord[1])}　<b>Z</b> ${fmt(best.coord[2])}`;
+        tip.style.display = 'block';
+        const wr = wrap.getBoundingClientRect();
+        let tx = e.clientX - wr.left + 14, ty = e.clientY - wr.top - 34;
+        if (tx + tip.offsetWidth > wr.width - 8) tx = e.clientX - wr.left - tip.offsetWidth - 14;
+        if (ty < 4) ty = e.clientY - wr.top + 16;
+        tip.style.left = tx + 'px';
+        tip.style.top = ty + 'px';
+      }else if (tip){
+        tip.style.display = 'none';
+      }
+      requestDraw();
+    }
+    function clearHover(){
+      if (hover){ hover = null; if (tip) tip.style.display = 'none'; requestDraw(); }
+    }
+
     canvas.addEventListener('mousedown', e => {
-      dragging = true; lx = e.clientX; ly = e.clientY; });
+      dragging = true; clearHover(); lx = e.clientX; ly = e.clientY; });
     window.addEventListener('mousemove', e => {
       if (!dragging) return;
       yaw += (e.clientX - lx) * 0.01;
       pitch = Math.max(-1.45, Math.min(1.45, pitch + (e.clientY - ly) * 0.01));
       lx = e.clientX; ly = e.clientY; requestDraw(); });
     window.addEventListener('mouseup', () => dragging = false);
+    canvas.addEventListener('mousemove', e => { if (!dragging) updateHover(e); });
+    canvas.addEventListener('mouseleave', clearHover);
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
       zoom = Math.max(0.3, Math.min(8, zoom * (e.deltaY < 0 ? 1.12 : 1/1.12)));
       requestDraw(); }, { passive: false });
     // 触屏: 单指旋转
     canvas.addEventListener('touchstart', e => {
-      if (e.touches.length === 1){ dragging = true; lx = e.touches[0].clientX; ly = e.touches[0].clientY; } });
+      if (e.touches.length === 1){ dragging = true; clearHover();
+        lx = e.touches[0].clientX; ly = e.touches[0].clientY; } });
     canvas.addEventListener('touchmove', e => {
       if (!dragging || e.touches.length !== 1) return;
       e.preventDefault();

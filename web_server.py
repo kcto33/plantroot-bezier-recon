@@ -92,6 +92,8 @@ def _run_job(jid, fn):
 class Handler(BaseHTTPRequestHandler):
     # ---- 静态资源(前端) ----
     def do_GET(self):
+        # 去掉查询参数(?xxx=yyy), 只按路径路由
+        self.path = self.path.split('?', 1)[0]
         if self.path.startswith('/api/job/'):
             jid = self.path[len('/api/job/'):]
             with JOBS_LOCK:
@@ -277,6 +279,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")  # 页面更新后浏览器不会拿到旧缓存
             self.end_headers()
             self.wfile.write(data)
         except FileNotFoundError:
